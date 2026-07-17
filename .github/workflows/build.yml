@@ -1,0 +1,60 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Build Debug APK
+        run: |
+          ./gradlew assembleDebug --no-daemon
+        env:
+          ANDROID_HOME: /opt/android/sdk
+          JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: app/build/outputs/apk/debug/*.apk
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ========== 本地构建说明（Codespace 开发模式）==========
+  # 
+  # 本项目设计为在 GitHub Codespace 中开发构建：
+  #
+  # 1. 打开仓库 → 点击 "Code" → "Create codespace on main"
+  # 2. Codespace 预装 Android SDK 和 JDK 17（2核4GB免费）
+  # 3. 在终端运行：./gradlew assembleDebug
+  # 4. APK 输出到：app/build/outputs/apk/debug/*.apk
+  #
+  # 本地电脑只需：git push / git pull（8GB核显无法本地编译）
+  #
