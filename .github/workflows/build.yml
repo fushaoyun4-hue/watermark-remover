@@ -22,13 +22,12 @@ jobs:
       - name: Cache Gradle packages
         uses: actions/cache@v3
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: '${{ runner.os }}-gradle-${{ hashFiles(''**/*.gradle*'',''**/gradle-wrapper.properties'') }}'
+               path: |
+                 ~/.gradle/caches
+                 ~/.gradle/wrapper
+         key: "${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}"
           restore-keys: |
-            ${{ runner.os }}-gradle-
-
+            ${{ runner.os }}-gradle- 
       - name: Create local.properties
         run: |
           echo "sdk.dir=/opt/android/sdk" > local.properties
