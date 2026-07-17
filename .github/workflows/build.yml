@@ -22,9 +22,11 @@ jobs:
 
       - name: Create local.properties
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "sdk.dir=/opt/android/sdk" > local.properties
 
-      - name: Build Debug APK
+           - name: Make gradlew executable
+        run: chmod +x gradlew
+ - name: Build Debug APK
         run: |
           ./gradlew assembleDebug --no-daemon
         env:
