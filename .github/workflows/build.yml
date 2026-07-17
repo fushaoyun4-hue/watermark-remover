@@ -19,14 +19,24 @@ jobs:
         with:
           java-version: 17
           distribution: temurin
+      - name: Cache Gradle packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Create local.properties
         run: |
           echo "sdk.dir=/opt/android/sdk" > local.properties
 
-           - name: Make gradlew executable
+      - name: Make gradlew executable
         run: chmod +x gradlew
- - name: Build Debug APK
+
+      - name: Build Debug APK
         run: |
           ./gradlew assembleDebug --no-daemon
         env:
