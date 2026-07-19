@@ -1,4 +1,4 @@
-name: Build APK
+.name: Build APK
 
 on:
   push:
@@ -18,16 +18,18 @@ jobs:
         uses: actions/setup-java@v4
         with:
           java-version: 17
-         .distribution: temurin
+          distribution: temurin
+
       - name: Cache Gradle packages
         uses: actions/cache@v3
         with:
-               path: |
-                 ~/.gradle/caches
-                 ~/.gradle/wrapper
-         key: "${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}"
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-gradle- 
+            ${{ runner.os }}-gradle-
+
       - name: Create local.properties
         run: |
           echo "sdk.dir=/opt/android/sdk" > local.properties
@@ -58,14 +60,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ========== 本地构建说明（Codespace 开发模式）==========
-  # 
-  # 本项目设计为在 GitHub Codespace 中开发构建：
-  #
-  # 1. 打开仓库 → 点击 "Code" → "Create codespace on main"
-  # 2. Codespace 预装 Android SDK 和 JDK 17（2核4GB免费）
-  # 3. 在终端运行：./gradlew assembleDebug
-  # 4. APK 输出到：app/build/outputs/apk/debug/*.apk
-  #
-  # 本地电脑只需：git push / git pull（8GB核显无法本地编译）
-  #
+# ========= 本地构建说明 (Codespace 开发模式) =========
+#
+# 本项目设计为在 GitHub Codespace 中开发构建：
+#
+# 1. 打开仓库 -> 点击 "Code" -> "Create codespace on main"
+# 2. Codespace 预装 Android SDK 和 JDK 17 (2核4GB免费)
+# 3. 在终端运行: ./gradlew assembleDebug
+# 4. APK 输出到: app/build/outputs/apk/debug/*.apk
+#
+# 本地电脑只需: git push / git pull (8GB核显无法本地编译)
+#
