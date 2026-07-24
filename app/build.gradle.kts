@@ -8,7 +8,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.watermark remover"
+        applicationId = "com.watermarkremover"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -20,10 +20,27 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // CI 注入环境变量：SIGNING_KEY_FILE / SIGNING_STORE_PASSWORD / SIGNING_KEY_ALIAS / SIGNING_KEY_PASSWORD
+            storeFile = System.getenv("SIGNING_KEY_FILE")?.let { file(it) }
+            storePassword = System.getenv("SIGNING_STORE_PASSWORD") ?: ""
+            keyAlias = System.getenv("SIGNING_KEY_ALIAS") ?: ""
+            keyPassword = System.getenv("SIGNING_KEY_PASSWORD") ?: ""
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // 仅当 storeFile 存在时启用 release 签名，否则 fallback 到 unsigned
+            val signingFile = System.getenv("SIGNING_KEY_FILE")
+            signingConfig = if (!signingFile.isNullOrEmpty()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
