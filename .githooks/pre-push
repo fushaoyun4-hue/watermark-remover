@@ -1,0 +1,65 @@
+#!/bin/bash
+# ============================================================
+# pre-push hook — 纯 bash 推送前格式检查 + 自动修复
+# 完全离线运行，无外部依赖
+# ============================================================
+set -e
+
+REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+cd "$REPO_DIR"
+
+echo "[pre-push] 推送前格式检查..."
+
+FIXED_FILES=""
+
+# ── 1. 检测并修复尾部空白 ──────────────────────────────────
+while IFS= read -r FILE; do
+    sed -i 's/[[:space:]]*$//' "$FILE"
+    FIXED_FILES="$FIXED_FILES $FILE"
+done < <(grep -rl '[[:space:]]$' --include="*.kt" --include="*.kts" --include="*.xml" --include="*.gradle" --include="*.gradle.kts" --include="*.md" --include="*.yaml" --include="*.yml" --include="*.properties" . 2>/dev/null || true)
+
+# ── 2. 检测并修复 CRLF ─────────────────────────────────────
+CRLF_FILES=$(file -n -m - $(git diff --name-only 2>/dev/null) 2>/dev/null | grep 'CRLF' | cut -d: -f1 || true)
+if [ -n "$CRLF_FILES" ]; then
+    for FILE in $CRLF_FILES; do
+        if [ -f "$FILE" ]; then
+            sed -i 's/\r$//' "$FILE"
+            FIXED_FILES="$FIXED_FILES $FILE"
+        fi
+    done
+fi
+
+# ── 3. 检测冲突标记 ─────────────────────────────────────────
+CONFLICT_FILES=$(grep -rlE '^<<<<<<<|^=======$|^>>>>>>>' --include="*.kt" --include="*.kts" --include="*.xml" --include="*.java" --include="*.gradle" --include="*.gradle.kts" . 2>/dev/null | head -10 || true)
+if [ -n "$CONFLICT_FILES" ]; then
+    echo ""
+    echo "=========================================="
+    echo "⚠️  发现冲突标记，push 已暂停："
+    echo ""
+    echo "$CONFLICT_FILES"
+    echo "=========================================="
+    echo "请手动解决冲突后再推送"
+    echo "=========================================="
+    exit 1
+fi
+
+# ── 4. 暂存并提交格式修复 ──────────────────────────────────
+if [ -n "$FIXED_FILES" ]; then
+    echo "[pre-push] 发现格式修复，自动创建 commit..."
+    echo "$FIXED_FILES" | xargs git add 2>/dev/null || true
+
+    if git rev-parse HEAD >/dev/null 2>&1; then
+        LAST_MSG=$(git log -1 --format='%s' 2>/dev/null || echo "")
+        if echo "$LAST_MSG" | grep -q "\[skip ci\]"; then
+            git commit --no-verify --amend --no-edit 2>/dev/null || true
+        else
+            git commit -m "chore: auto-format fixes [skip ci]" --no-verify
+        fi
+    else
+        git commit -m "chore: auto-format fixes [skip ci]" --no-verify
+    fi
+    echo "[pre-push] ✓ 格式修复已自动提交"
+fi
+
+echo "[pre-push] ✓ 格式检查通过，开始推送..."
+exit 0

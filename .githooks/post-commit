@@ -1,0 +1,8 @@
+#!/bin/bash
+# ============================================================
+# post-commit hook — 记录最近一次 commit 哈希到本地文件
+# ============================================================
+set -e
+REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+COMMIT_FILE="$REPO_DIR/.git/LAST_COMMIT"
+git rev-parse HEAD > "$COMMIT_FILE" 2>/dev/null
