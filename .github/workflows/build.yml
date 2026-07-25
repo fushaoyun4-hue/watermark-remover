@@ -2,7 +2,7 @@
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -64,7 +64,7 @@ jobs:
 #
 # 本项目设计为在 GitHub Codespace 中开发构建：
 #
-# 1. 打开仓库 -> 点击 "Code" -> "Create codespace on main"
+# 1. 打开仓库 -> 点击 "Code" -> "Create codespace on master"
 # 2. Codespace 预装 Android SDK 和 JDK 17 (2核4GB免费)
 # 3. 在终端运行: ./gradlew assembleDebug
 # 4. APK 输出到: app/build/outputs/apk/debug/*.apk
