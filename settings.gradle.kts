@@ -13,6 +13,8 @@ dependencyResolutionManagement {
         mavenCentral()
         // OpenCV Maven repository
         maven { url = uri("https://artifacts.aitorafla.com/releases") }
+        // JitPack (LaMa-ONNX / 其他第三方开源库)
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
