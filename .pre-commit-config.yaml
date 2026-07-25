@@ -1,17 +1,20 @@
 # ============================================================
 # pre-commit hook 配置
 # 触发条件：每次 git commit 时自动运行
-# 功能：自动修复尾部空白 + 统一 LF 行尾
+# 功能：自动修复尾部空白 + 统一 LF 行尾 + YAML 语法检查
 # ============================================================
-# 文件后缀（逗号分隔）
-extensions:
-  - kt
-  - kts
-  - xml
-  - gradle
-  - gradle.kts
-  - md
-  - yaml
-  - yml
-  - properties
-  - java
+repos:
+  - repo: local
+    hooks:
+      - id: fix-ewspace
+        name: Fix end-of-line and trailing whitespace
+        entry: python .githooks/fix_ewspace.py
+        language: system
+        files: '\.(kt|kts|xml|gradle|gradle\.kts|md|yaml|yml|properties|java)$'
+
+      - id: yamllint-check
+        name: yamllint (local)
+        entry: python -m yamllint
+        language: system
+        files: '\.(yaml|yml)$'
+        types: [file]
