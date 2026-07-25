@@ -1,0 +1,24 @@
+---
+# ============================================================
+# yamllint 配置文件
+# 作用：统一检查仓库内 YAML 语法（重点是 .github/workflows/ 下的工作流文件）
+# 说明：
+#   - truthy.check-keys: false 避免 GitHub Actions 的 'on:' 键被误判为布尔值而报错
+#   - line-length 放宽到 120，超长仅警告不阻断
+#   - document-start.present: false 不强制要求文件以 '---' 开头
+# ============================================================
+extends: default
+
+rules:
+  # 'on:' 是 GitHub Actions 的触发键，yamllint 会把它当成布尔值，这里关闭对键的检查
+  truthy:
+    check-keys: false
+
+  # 行宽放宽到 120 字符，超过仅警告（level: warning）不导致失败
+  line-length:
+    max: 120
+    level: warning
+
+  # 不强制文件以 '---' 文档开始符开头，兼容现有工作流风格
+  document-start:
+    present: false
