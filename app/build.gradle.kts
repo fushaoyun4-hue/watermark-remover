@@ -97,8 +97,8 @@ dependencies {
     kapt("com.google.dagger:hilt-compiler:2.50")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
-    // OpenCV Android SDK (4.9.0)
-    implementation("com.quvideo:openCVAndroid:4.9.0")
+    // OpenCV Android SDK (4.9.0) - 官方 Maven Central 发布
+    implementation("org.opencv:opencv:4.9.0")
 
     // FFmpegKit (Full GPL - includes FFmpeg)
     implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2")
