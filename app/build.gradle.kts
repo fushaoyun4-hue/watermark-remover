@@ -123,4 +123,8 @@ dependencies {
 kapt {
     correctErrorTypes = true
     useBuildCache = true
+    javacOptions {
+        // kapt worker 单独堆内存，防止注解处理被 OOM kill
+        option("-J-Xmx2048m")
+    }
 }
