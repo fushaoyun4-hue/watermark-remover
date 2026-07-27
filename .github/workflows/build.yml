@@ -47,7 +47,9 @@ jobs:
         if: always()
         run: |
           if [ -f build.log ]; then
-            grep -E "^e: |What went wrong|Execution failed for|> Task .*FAILED|Caused by:|> Could not" build.log | head -40 | while IFS= read -r line; do
+            LINES=$(grep -E "e: |Error|Exception|What went wrong|Execution failed|Caused by|> Could not|FAILURE|failed|FAILED" build.log | tail -10)
+            if [ -z "$LINES" ]; then LINES=$(tail -n 12 build.log); fi
+            echo "$LINES" | while IFS= read -r line; do
               echo "::error::$line"
             done
           fi
