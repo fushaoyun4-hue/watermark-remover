@@ -4,18 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material3.*
@@ -26,16 +20,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -56,24 +47,22 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 
 /**
- * 编辑页：支持多选框 + 拖拽调整 + 删除单个区域
+ * 编辑页：多选框 + 拖拽新建 + 点击删除已确认框
  *
  * 交互设计：
- * - 拖拽空白区域 → 新增临时框（蓝色虚线）
- * - 松手 → 框固定下来并显示 ✅ 确认标记，同时可以继续拖拽新增更多
- * - 点击未确认的框（蓝色实线）→ 该框进入"已确认"状态，显示 ✅，锁定不可再拖
- * - 点击已确认的框 → 删除该框
- * - 清除按钮 → 清空所有框
+ * - 拖拽空白区域 → 新增临时框（蓝色虚线），松开自动确认
+ * - 点击已确认的框（绿色）→ 删除该框
+ * - 撤销 / 清空按钮
+ * - 进度弹窗（处理中）
  */
 @HiltViewModel
 class EditorViewModel @Inject constructor(
     private val videoProcessor: VideoProcessor
 ) : ViewModel() {
 
-    /** 归一化坐标的矩形框 */
     data class MaskRect(
         val id: Int,
-        var left: Float,   // 归一化 0~1
+        var left: Float,
         var top: Float,
         var right: Float,
         var bottom: Float
@@ -89,7 +78,7 @@ class EditorViewModel @Inject constructor(
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
 
-    /** 当前正在拖拽但尚未固定的临时框（null = 没有在画新框） */
+    /** 正在拖拽的临时框（null = 没有在画新框） */
     var pendingMask by mutableStateOf<MaskRect?>(null)
         private set
 
@@ -107,38 +96,34 @@ class EditorViewModel @Inject constructor(
 
     private var nextId = 0
 
-    /** 在临时框松开时，将其正式加入 masks */
+    /** 松手时将临时框正式加入 masks */
     fun confirmPendingMask() {
         val p = pendingMask ?: return
         if (p.width > 0.02f && p.height > 0.02f) {
             masks = masks + MaskRect(
                 id = nextId++,
-                left = minOf(p.left, p.right),
-                top  = minOf(p.top, p.bottom),
-                right= maxOf(p.left, p.right),
-                bottom=maxOf(p.top, p.bottom)
+                left   = minOf(p.left, p.right),
+                top    = minOf(p.top, p.bottom),
+                right  = maxOf(p.left, p.right),
+                bottom = maxOf(p.top, p.bottom)
             )
         }
         pendingMask = null
     }
 
-    /** 取消当前临时框 */
     fun cancelPendingMask() {
         pendingMask = null
     }
 
-    /** 删除已确认的框 */
     fun removeMask(id: Int) {
         masks = masks.filter { it.id != id }
     }
 
-    /** 清空所有已确认框 */
     fun clearMasks() {
         masks = emptyList()
         pendingMask = null
     }
 
-    /** 开始处理 */
     fun startProcessing(
         context: android.content.Context,
         mediaUri: Uri,
@@ -160,7 +145,7 @@ class EditorViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 if (mediaType == "image") {
-                    // ---- 图片：解码必须在 IO 线程 ----
+                    // ---- 图片：解码在 IO 线程 ----
                     val bitmap = withContext(Dispatchers.IO) {
                         context.contentResolver.openInputStream(mediaUri)?.use { inputStream ->
                             BitmapFactory.decodeStream(inputStream)
@@ -173,9 +158,10 @@ class EditorViewModel @Inject constructor(
                         return@launch
                     }
 
-                    // ---- inpaint 在 Default 线程 ----
                     progressPhase = "正在处理..."
                     progress = 30
+
+                    // ---- inpaint 在 Default 线程 ----
                     val result = withContext(Dispatchers.Default) {
                         videoProcessor.processImage(bitmap, androidRects)
                     }
@@ -183,13 +169,14 @@ class EditorViewModel @Inject constructor(
 
                     progress = 80
                     val outputFile = withContext(Dispatchers.IO) {
-                        File(File(context.cacheDir, "result_${System.currentTimeMillis()}.jpg")).apply {
+                        File(context.cacheDir, "result_${System.currentTimeMillis()}.jpg").apply {
                             FileOutputStream(this).use { fos ->
                                 result.compress(Bitmap.CompressFormat.JPEG, 95, fos)
                             }
                         }
                     }
                     result.recycle()
+
                     progress = 100
                     onComplete(mediaUri.toString(), Uri.fromFile(outputFile).toString())
                     isProcessing = false
@@ -222,9 +209,9 @@ class EditorViewModel @Inject constructor(
     }
 }
 
-// ────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
 //  UI 层
-// ────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -238,10 +225,7 @@ fun EditorScreen(
     val viewModel: EditorViewModel = androidx.hilt.navigation.compose.hiltViewModel()
 
     var canvasSize by remember { mutableStateOf(Size.Zero) }
-
-    // 拖拽新建框的状态
     var dragStart by remember { mutableStateOf(Offset.Zero) }
-    var isDragging by remember { mutableStateOf(false) }
 
     // 视频预览（首帧）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -263,8 +247,7 @@ fun EditorScreen(
         if (viewModel.isProcessing) {
             ProcessingDialog(
                 progress = viewModel.progress,
-                phase = viewModel.progressPhase,
-                onCancel = { /* 暂不支持中途取消 */ }
+                phase = viewModel.progressPhase
             )
         }
 
@@ -278,7 +261,6 @@ fun EditorScreen(
                         }
                     },
                     actions = {
-                        // 撤销最后框
                         IconButton(
                             onClick = {
                                 if (viewModel.masks.isNotEmpty()) {
@@ -287,9 +269,8 @@ fun EditorScreen(
                             },
                             enabled = viewModel.masks.isNotEmpty()
                         ) {
-                            Icon(Icons.Filled.Delete, contentDescription = "撤销")
+                            Icon(Icons.Filled.Delete, contentDescription = "撤销最后框")
                         }
-                        // 清空全部
                         IconButton(
                             onClick = { viewModel.clearMasks() },
                             enabled = viewModel.masks.isNotEmpty()
@@ -305,7 +286,6 @@ fun EditorScreen(
                         .fillMaxWidth()
                         .padding(16.dp)
                 ) {
-                    // 错误提示
                     viewModel.errorMessage?.let { msg ->
                         Text(
                             text = "⚠️ $msg",
@@ -315,7 +295,6 @@ fun EditorScreen(
                         )
                     }
 
-                    // 状态提示
                     when {
                         viewModel.masks.isEmpty() && viewModel.pendingMask == null -> {
                             Text(
@@ -327,7 +306,7 @@ fun EditorScreen(
                         }
                         viewModel.pendingMask != null -> {
                             Text(
-                                text = "⏳ 框已画好 ✅ 请继续框选其他区域，或点击「开始去除」",
+                                text = "✅ 框已画好，继续拖拽可叠加更多区域",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -343,7 +322,6 @@ fun EditorScreen(
                         }
                     }
 
-                    // 开始按钮
                     Button(
                         onClick = {
                             viewModel.startProcessing(
@@ -380,50 +358,46 @@ fun EditorScreen(
                             canvasSize = Size(size.width.toFloat(), size.height.toFloat())
                         }
                         .pointerInput(Unit) {
-                            detectTapGestures { offset ->
-                                val normalized = Offset(
-                                    offset.x / canvasSize.width,
-                                    offset.y / canvasSize.height
-                                )
-                                // 点击已确认的框 → 删除
-                                val hit = viewModel.masks.find { m ->
-                                    normalized.x >= minOf(m.left, m.right) - 0.02f &&
-                                    normalized.x <= maxOf(m.left, m.right) + 0.02f &&
-                                    normalized.y >= minOf(m.top, m.bottom) - 0.02f &&
-                                    normalized.y <= maxOf(m.top, m.bottom) + 0.02f
+                            awaitEachGesture {
+                                val down = awaitPointerEvent()
+                                val startPos = down.changes.first().position
+                                val nx0 = startPos.x / canvasSize.width
+                                val ny0 = startPos.y / canvasSize.height
+
+                                val hitMask = viewModel.masks.find { m ->
+                                    nx0 >= minOf(m.left, m.right) - 0.02f &&
+                                    nx0 <= maxOf(m.left, m.right) + 0.02f &&
+                                    ny0 >= minOf(m.top,  m.bottom) - 0.02f &&
+                                    ny0 <= maxOf(m.top,  m.bottom) + 0.02f
                                 }
-                                if (hit != null) {
-                                    viewModel.removeMask(hit.id)
+
+                                if (hitMask != null) {
+                                    // 点击已确认框 → 删除
+                                    viewModel.removeMask(hitMask.id)
+                                } else {
+                                    // 空白处开始拖拽新建框
+                                    dragStart = startPos
+                                    viewModel.cancelPendingMask()
+
+                                    var dragEnded = false
+                                    while (!dragEnded) {
+                                        val event = awaitPointerEvent()
+                                        event.changes.forEach { it.consume() }
+                                        val pos = event.changes.first().position
+                                        viewModel.pendingMask = EditorViewModel.MaskRect(
+                                            id = -1,
+                                            left   = minOf(dragStart.x, pos.x) / canvasSize.width,
+                                            top    = minOf(dragStart.y, pos.y) / canvasSize.height,
+                                            right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
+                                            bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
+                                        )
+                                        if (!event.changes.any { it.pressed }) {
+                                            dragEnded = true
+                                            viewModel.confirmPendingMask()
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        .pointerInput(Unit) {
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    dragStart = offset
-                                    isDragging = true
-                                    // 取消之前的 pending
-                                    viewModel.cancelPendingMask()
-                                },
-                                onDrag = { change, _ ->
-                                    val end = change.position
-                                    val left   = minOf(dragStart.x, end.x)
-                                    val top    = minOf(dragStart.y, end.y)
-                                    val right  = maxOf(dragStart.x, end.x)
-                                    val bottom = maxOf(dragStart.y, end.y)
-                                    viewModel.pendingMask = EditorViewModel.MaskRect(
-                                        id = -1,
-                                        left = left / canvasSize.width,
-                                        top  = top  / canvasSize.height,
-                                        right= right/ canvasSize.width,
-                                        bottom=bottom/ canvasSize.height
-                                    )
-                                },
-                                onDragEnd = {
-                                    isDragging = false
-                                    viewModel.confirmPendingMask()
-                                }
-                            )
                         }
                 ) {
                     // 媒体预览层
@@ -456,10 +430,9 @@ fun EditorScreen(
                     // 蒙版绘制层
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val borderPx    = 2.dp.toPx()
-                        val handlePx    = 8.dp.toPx()
                         val checkMarkPx = 18.dp.toPx()
 
-                        // ---- 已确认的框：绿色边框 + 右上角勾 ----
+                        // ---- 已确认的框：绿色边框 + 右上角绿色圆形 ✅ ----
                         viewModel.masks.forEach { mask ->
                             val l = minOf(mask.left,  mask.right)  * size.width
                             val t = minOf(mask.top,   mask.bottom) * size.height
@@ -468,13 +441,11 @@ fun EditorScreen(
                             val w = r - l
                             val h = b - t
 
-                            // 半透明绿色填充
                             drawRect(
                                 color = Color(0xFF00C853).copy(alpha = 0.22f),
                                 topLeft = Offset(l, t),
                                 size = Size(w, h)
                             )
-                            // 实线绿色边框
                             drawRect(
                                 color = Color(0xFF00C853),
                                 topLeft = Offset(l, t),
@@ -482,10 +453,9 @@ fun EditorScreen(
                                 style = Stroke(width = borderPx)
                             )
 
-                            // 右上角 ✅ 勾：中心在矩形右上角内侧
+                            // 右上角绿色圆形（✅ 确认标记）
                             val cx = r - checkMarkPx * 0.9f
                             val cy = t + checkMarkPx * 0.9f
-                            // 圆形背景
                             drawCircle(
                                 color = Color(0xFF00C853),
                                 radius = checkMarkPx,
@@ -493,13 +463,12 @@ fun EditorScreen(
                             )
                             drawCircle(
                                 color = Color.White,
-                                radius = checkMarkPx * 0.7f,
+                                radius = checkMarkPx * 0.62f,
                                 center = Offset(cx, cy)
                             )
-                            // 勾（简化为一条斜线+圆点表示）
                             drawCircle(
                                 color = Color(0xFF00C853),
-                                radius = checkMarkPx * 0.35f,
+                                radius = checkMarkPx * 0.32f,
                                 center = Offset(cx, cy)
                             )
                         }
@@ -535,21 +504,18 @@ fun EditorScreen(
 
 /**
  * 动态进度弹窗（仿"开拍"风格）
- * - 卡片居中，圆角
- * - 标题 + 百分比数字
- * - LinearProgressIndicator 进度条
- * - 阶段文字
+ * - 居中卡片，圆角
+ * - 百分比大数字 + LinearProgressIndicator + 阶段文字
  */
 @Composable
 fun ProcessingDialog(
     progress: Int,
-    phase: String,
-    onCancel: () -> Unit
+    phase: String
 ) {
     Dialog(
-        onDismissRequest = { /* 不允许点击外部关闭 */ },
+        onDismissRequest = { /* 不允许关闭 */ },
         properties = DialogProperties(
-            dismissOnBackPress = true,
+            dismissOnBackPress = false,
             dismissOnClickOutside = false,
             usePlatformDefaultWidth = false
         )
@@ -570,7 +536,6 @@ fun ProcessingDialog(
                     .padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // 标题
                 Text(
                     text = "正在处理",
                     style = MaterialTheme.typography.titleLarge,
@@ -580,7 +545,6 @@ fun ProcessingDialog(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // 百分比数字（大字号）
                 Text(
                     text = "$progress%",
                     style = MaterialTheme.typography.displaySmall,
@@ -590,7 +554,6 @@ fun ProcessingDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 进度条
                 LinearProgressIndicator(
                     progress = { progress / 100f },
                     modifier = Modifier
@@ -602,7 +565,6 @@ fun ProcessingDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // 阶段描述
                 Text(
                     text = phase.ifEmpty { "准备中..." },
                     style = MaterialTheme.typography.bodyMedium,
