@@ -39,28 +39,18 @@ jobs:
       - name: Build Debug APK
         run: |
           set -o pipefail
-          ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
+          ./gradlew assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
         env:
           JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
-      - name: Dump build log on failure
-        if: failure()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+      - name: Emit build errors as annotations
+        if: always()
         run: |
           if [ -f build.log ]; then
-            tail -c 30000 build.log > /tmp/ci_log.txt
-          else
-            echo "build.log not generated" > /tmp/ci_log.txt
+            grep -E "^e: |What went wrong|Execution failed for|> Task .*FAILED|Caused by:|> Could not" build.log | head -40 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
-          jq -n --rawfile log /tmp/ci_log.txt '{body: ("## CI Build Log (tail 30KB)\n\`\`\`\n" + $log + "\n\`\`\`")}' > /tmp/payload.json
-          curl -sS -X POST \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d @/tmp/payload.json \
-            "https://api.github.com/repos/$REPO/commits/$SHA/comments"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
