@@ -17,6 +17,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
+import org.opencv.photo.Photo
 import java.io.File
 import java.io.FileOutputStream
 import javax.inject.Inject
@@ -121,17 +122,11 @@ class VideoProcessor @Inject constructor(
         Imgproc.dilate(mask, mask, kernel)
         kernel.release()
 
-        // 执行修复：当前 OpenCV 依赖未暴露 inpaint 本地方法，
-        // 改用「高斯模糊 + 蒙版合成」的轻量方案（细水印足够，零模型、零额外依赖）。
+        // 执行修复：OpenCV Photo 模块的 inpaint（Telea / Navier-Stokes 算法，零模型、纯离线）
         val dst = Mat()
-        val blurred = Mat()
         val radius = if (useNavierStokes) INPAINT_RADIUS_NS else INPAINT_RADIUS_TELEA
-        val k = (radius * 2 + 1).toInt().coerceAtLeast(3)
-        Imgproc.GaussianBlur(src, blurred, org.opencv.core.Size(k.toDouble(), k.toDouble()), 0.0)
-        // 仅在蒙版非 0 处用模糊结果覆盖原图
-        blurred.copyTo(src, mask)
-        src.copyTo(dst)
-        blurred.release()
+        val flag = if (useNavierStokes) Photo.INPAINT_NS else Photo.INPAINT_TELEA
+        Photo.inpaint(src, mask, dst, radius, flag)
 
         // 转换回 Bitmap
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
