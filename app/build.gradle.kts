@@ -70,6 +70,11 @@ android {
     }
 
     packaging {
+        jniLibs {
+            // OpenCV(4.9.0) 与 FFmpegKit(6.0-2) 的 AAR 都自带 libc++_shared.so，
+            // mergeDebugNativeLibs 会因重复而失败，pickFirst 取其一即可。
+            pickFirsts += setOf("**/libc++_shared.so")
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }

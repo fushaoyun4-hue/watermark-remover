@@ -57,7 +57,7 @@ jobs:
             if [ "$SZ" -eq 0 ]; then
               echo "::error::build.log EMPTY - gradle produced no captured output"
             else
-              tail -n 10 build.log | while IFS= read -r line; do echo "::error::$line"; done
+              tail -n 50 build.log | while IFS= read -r line; do echo "::error::$line"; done
             fi
           else
             echo "::error::build.log MISSING - Build step did not create it"
