@@ -2,6 +2,7 @@ package com.watermarkremover.inference
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.RectF
 import android.net.Uri
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -10,10 +11,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import com.arthenica.ffmpegkit.ReturnCode
 import org.opencv.android.Utils
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import java.io.File
@@ -37,8 +38,21 @@ class VideoProcessor @Inject constructor(
 ) {
     companion object {
         private const val TAG = "VideoProcessor"
-        private const val FPS = 30
-        private const val FRAME_QUALITY = 95
+
+        // ========== Inpaint 算法核心参数 ==========
+        // 修复半径：框选区域向外扩展的像素范围
+        // 值越大：边缘越平滑，但计算越慢；值越小：细节保留好但可能有残留
+        // 水印通常比较薄，3-5px 是最佳平衡点
+        private const val INPAINT_RADIUS_TELEA = 5.0
+
+        // NS（Navier-Stokes）算法参数：倾向于保留结构，适合去除边缘清晰的水印
+        private const val INPAINT_RADIUS_NS = 5.0
+
+        // JPEG 压缩质量：帧质量，影响输出清晰度和文件大小
+        private const val FRAME_QUALITY = 90
+
+        // FFmpeg 编码质量（CRF 0=无损，23=默认，28=低码率）
+        private const val ENCODE_CRF = "20"
     }
 
     /**
@@ -52,11 +66,24 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 处理图片（单帧）
+     *
+     * 算法说明：
+     * - 使用 Telea FMM（Fast Marching Method）：边缘保留好，速度快，适合大多数水印
+     * - 同时也支持 NS 算法，可在性能有余量时切换
+     *
      * @param bitmap 原图
      * @param masks 用户框选的水印区域（归一化坐标 0~1）
+     * @param useNavierStokes 是否使用 NS 算法（默认 false，使用 Telea）
      * @return 修复后的图片
      */
-    suspend fun processImage(bitmap: Bitmap, masks: List<RectF>): Bitmap = withContext(Dispatchers.Default) {
+    suspend fun processImage(
+        bitmap: Bitmap,
+        masks: List<RectF>,
+        useNavierStokes: Boolean = false
+    ): Bitmap = withContext(Dispatchers.Default) {
+
+        if (masks.isEmpty()) return@withContext bitmap
+
         val width = bitmap.width
         val height = bitmap.height
 
@@ -64,33 +91,55 @@ class VideoProcessor @Inject constructor(
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
 
+        // 转为灰度图（蒙版用）
+        val graySrc = Mat()
+        Imgproc.cvtColor(src, graySrc, Imgproc.COLOR_BGR2GRAY)
+
         // 创建蒙版
         val mask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
 
         for (rect in masks) {
-            val left = (rect.left * width).toInt().coerceIn(0, width - 1)
-            val top = (rect.top * height).toInt().coerceIn(0, height - 1)
-            val right = (rect.right * width).toInt().coerceIn(left + 1, width)
+            // 归一化坐标 → 像素坐标
+            val left   = (rect.left   * width).toInt().coerceIn(0, width - 1)
+            val top    = (rect.top    * height).toInt().coerceIn(0, height - 1)
+            val right  = (rect.right  * width).toInt().coerceIn(left + 1, width)
             val bottom = (rect.bottom * height).toInt().coerceIn(top + 1, height)
 
-            // 填充蒙版区域（白色 = 需要修复）
-            for (y in top until bottom) {
-                for (x in left until right) {
-                    mask.put(y, x, 255.0)
-                }
-            }
+            // 填充蒙版（白色 = 需要修复区域）
+            // 用 -1 可以直接填充整个矩形（含边界）
+            Imgproc.rectangle(
+                mask,
+                org.opencv.core.Point(left.toDouble(), top.toDouble()),
+                org.opencv.core.Point(right.toDouble(), bottom.toDouble()),
+                Scalar(255.0),
+                -1
+            )
         }
 
-        // OpenCV Inpaint - Telea 算法（快速、轻量、无需模型）
+        // 对蒙版做一次轻微的膨胀（dilate），扩大修复范围，让边缘过渡更自然
+        val kernel = Imgproc.getStructuringElement(
+            Imgproc.MORPH_ELLIPSE,
+            org.opencv.core.Size(3.0, 3.0)
+        )
+        Imgproc.dilate(mask, mask, kernel)
+        kernel.release()
+
+        // 执行 Inpaint
         val dst = Mat()
-        Imgproc.inpaint(src, mask, dst, 3.0, Imgproc.INPAINT_TELEA)
+        if (useNavierStokes) {
+            Imgproc.inpaint(src, mask, dst, INPAINT_RADIUS_NS, Imgproc.INPAINT_NS)
+        } else {
+            // Telea 算法：边缘感知好，速度快，推荐优先使用
+            Imgproc.inpaint(src, mask, dst, INPAINT_RADIUS_TELEA, Imgproc.INPAINT_TELEA)
+        }
 
         // 转换回 Bitmap
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         Utils.matToBitmap(dst, result)
 
-        // 释放内存
+        // 严格释放内存
         src.release()
+        graySrc.release()
         dst.release()
         mask.release()
 
@@ -99,17 +148,19 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 处理视频（逐帧处理 + 合成）
-     * @param videoUri 视频文件 URI
-     * @param masks 用户框选的水印区域
-     * @param onProgress 进度回调
-     * @return 修复后的视频 URI
+     *
+     * 内存优化策略：
+     * - 每帧处理完立即 recycle Bitmap
+     * - 使用 Flow 而非 blocking，每帧 yield 一次
+     * - 帧解码使用低内存选项
      */
     fun processVideo(
         videoUri: Uri,
         masks: List<RectF>
     ): Flow<ProcessState> = flow {
         try {
-            val tempDir = File(context.cacheDir, "video_process_${System.currentTimeMillis()}")
+            val timestamp = System.currentTimeMillis()
+            val tempDir = File(context.cacheDir, "vp_$timestamp")
             tempDir.mkdirs()
 
             val framesDir = File(tempDir, "frames")
@@ -140,57 +191,66 @@ class VideoProcessor @Inject constructor(
             }
 
             // ========== 阶段2：逐帧修复 ==========
-            emit(ProcessState.Progress(10, 100, "正在去除水印（${totalFrames}帧）..."))
+            emit(ProcessState.Progress(5, 100, "正在去除水印（$totalFrames 帧）..."))
 
             val repairedDir = File(tempDir, "repaired")
             repairedDir.mkdirs()
 
             var processed = 0
             for (frameFile in frameFiles) {
-                val bitmap = android.graphics.BitmapFactory.decodeFile(frameFile.absolutePath)
+                // BitmapFactory.Options 降低内存占用
+                val options = BitmapFactory.Options().apply {
+                    inPreferredConfig = Bitmap.Config.RGB_565  // 16bit，省 50% 内存
+                }
+                val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath, options)
+
                 if (bitmap != null) {
                     val repaired = processImage(bitmap, masks)
                     val outputFile = File(repairedDir, frameFile.name)
                     FileOutputStream(outputFile).use { fos ->
                         repaired.compress(Bitmap.CompressFormat.JPEG, FRAME_QUALITY, fos)
                     }
-                    bitmap.recycle()
                     repaired.recycle()
+                    bitmap.recycle()
                 }
 
                 processed++
-                val progress = 10 + (processed * 80 / totalFrames)
-                emit(ProcessState.Progress(progress.toInt(), 100, "处理中 $processed/$totalFrames"))
+                val progress = 5 + (processed * 85 / totalFrames)
+                emit(ProcessState.Progress(progress.toInt().coerceIn(5, 90), 100, "处理中 $processed/$totalFrames"))
             }
 
             // ========== 阶段3：合成视频 ==========
-            emit(ProcessState.Progress(90, 100, "正在合成视频..."))
+            emit(ProcessState.Progress(92, 100, "正在合成视频..."))
 
-            val合成Result = FFmpegExtractor.mergeFrames(
+            val mergeResult = FFmpegExtractor.mergeFrames(
                 framesDir = repairedDir,
                 outputFile = outputVideo,
                 originalVideoUri = videoUri
             )
 
-            if (合成Result.isFailure) {
-                emit(ProcessState.Error("视频合成失败: ${合成Result.exceptionOrNull()?.message}"))
+            if (mergeResult.isFailure) {
+                emit(ProcessState.Error("视频合成失败: ${mergeResult.exceptionOrNull()?.message}"))
                 return@flow
             }
 
             // 复制到应用私有目录
             val finalDir = File(context.filesDir, "results")
             finalDir.mkdirs()
-            val finalFile = File(finalDir, "watermark_removed_${System.currentTimeMillis()}.mp4")
+            val finalFile = File(finalDir, "watermark_removed_$timestamp.mp4")
             outputVideo.copyTo(finalFile, overwrite = true)
 
-            // 清理临时文件
-            tempDir.deleteRecursively()
+            // 清理所有临时文件
+            framesDir.deleteRecursively()
+            repairedDir.deleteRecursively()
+            outputVideo.delete()
+            tempDir.delete()
 
             emit(ProcessState.Progress(100, 100, "完成"))
             emit(ProcessState.Success(Uri.fromFile(finalFile)))
 
         } catch (e: OutOfMemoryError) {
-            emit(ProcessState.Error("内存不足，请选择更短的视频"))
+            System.gc()
+            emit(ProcessState.Error("内存不足，请选择更短的视频或减少框选区域"))
         } catch (e: Exception) {
             emit(ProcessState.Error("处理失败: ${e.message}"))
         }
@@ -218,8 +278,8 @@ object FFmpegExtractor {
         val command = arrayOf(
             "-y",                          // 覆盖输出
             "-i", inputPath,                // 输入视频
-            "-vf", "fps=30",                // 固定30fps
-            "-q:v", "2",                   // 质量
+            "-vsync", "cfr",               // 恒定帧率
+            "-q:v", "2",                   // 高质量 JPEG
             outputPattern                   // 输出帧
         )
 
@@ -240,24 +300,23 @@ object FFmpegExtractor {
         outputFile: File,
         originalVideoUri: Uri
     ): Result<File> = runCatching {
-        // 获取原视频信息（尺寸、时长等）
-        val mediaInfo = getVideoInfo(originalVideoUri)
+        val mediaInfo = getVideoInfo(framesDir.listFiles()?.firstOrNull())
         val width = mediaInfo["width"] ?: 1920
         val height = mediaInfo["height"] ?: 1080
-        val duration = mediaInfo["duration"] ?: 15
+        val frameCount = framesDir.listFiles()?.size ?: 0
+        val fps = mediaInfo["fps"] ?: 30.0
 
         val inputPattern = File(framesDir, "frame_%04d.jpg").absolutePath
 
         val command = arrayOf(
             "-y",
-            "-framerate", "30",
+            "-framerate", fps.toString(),
             "-i", inputPattern,
             "-c:v", "libx264",
-            "-preset", "fast",              // 快速编码
-            "-crf", "23",                   // 质量
+            "-preset", "fast",
+            "-crf", ENCODE_CRF,
             "-pix_fmt", "yuv420p",
-            "-s", "${width}x${height}",
-            "-t", duration.toString(),
+            "-vf", "scale=$width:$height:force_original_aspect_ratio=decrease,pad=$width:$height:(ow-iw)/2:(oh-ih)/2",
             outputFile.absolutePath
         )
 
@@ -271,34 +330,25 @@ object FFmpegExtractor {
     }
 
     /**
-     * 获取视频信息
+     * 获取视频信息（从首帧直接读取更可靠）
      */
-    private fun getVideoInfo(uri: Uri): Map<String, Double> {
-        val session = com.arthenica.ffmpegkit.FFmpegKit.execute("-i ${uri.path}")
-        val output = session.output
-
-        var width = 1920.0
-        var height = 1080.0
-        var duration = 15.0
-
-        // 解析输出获取尺寸
-        val sizeRegex = """(\d+)x(\d+)""".toRegex()
-        sizeRegex.find(output)?.let {
-            width = it.groupValues[1].toDouble()
-            height = it.groupValues[2].toDouble()
+    private fun getVideoInfo(firstFrame: File?): Map<String, Double> {
+        if (firstFrame != null && firstFrame.exists()) {
+            try {
+                val options = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                BitmapFactory.decodeFile(firstFrame.absolutePath, options)
+                if (options.outWidth > 0 && options.outHeight > 0) {
+                    return mapOf(
+                        "width" to options.outWidth.toDouble(),
+                        "height" to options.outHeight.toDouble(),
+                        "fps" to 30.0
+                    )
+                }
+            } catch (_: Exception) { /* ignore */ }
         }
-
-        // 解析输出获取时长
-        val durationRegex = """Duration: (\d+):(\d+):(\d+)\.(\d+)""".toRegex()
-        durationRegex.find(output)?.let {
-            val h = it.groupValues[1].toDouble()
-            val m = it.groupValues[2].toDouble()
-            val s = it.groupValues[3].toDouble()
-            val ms = it.groupValues[4].toDouble()
-            duration = h * 3600 + m * 60 + s + ms / 100
-        }
-
-        return mapOf("width" to width, "height" to height, "duration" to duration)
+        return mapOf("width" to 1920.0, "height" to 1080.0, "fps" to 30.0)
     }
 
     /**
