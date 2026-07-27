@@ -63,7 +63,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
           git add ci_artifacts/ci_error.txt
           git commit -m "ci: 保存构建错误日志 [skip ci]" || echo "nothing to commit"
-          git push origin master || echo "PUSH_FAILED"
+          git push origin HEAD:ci-debug --force || echo "PUSH_FAILED"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
