@@ -31,17 +31,14 @@ jobs:
             ${{ runner.os }}-gradle-
 
       - name: Create local.properties
-        run: |
-          echo "sdk.dir=/opt/android/sdk" > local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Make gradlew executable
         run: chmod +x gradlew
 
       - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon
         env:
-          ANDROID_HOME: /opt/android/sdk
           JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
       - name: Upload Debug APK
