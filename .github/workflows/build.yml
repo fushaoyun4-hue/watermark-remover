@@ -57,7 +57,7 @@ jobs:
             if [ "$SZ" -eq 0 ]; then
               echo "::error::build.log EMPTY - gradle produced no captured output"
             else
-              grep -E "What went wrong|Execution failed|Duplicate class|found in modules|more than one file" build.log | tail -n 9 | while IFS= read -r line; do echo "::error::$line"; done
+              awk '/What went wrong/{f=1} f{print} /\* Try:/{exit}' build.log | tail -n 12 | while IFS= read -r line; do echo "::error::$line"; done
             fi
           else
             echo "::error::build.log MISSING - Build step did not create it"
