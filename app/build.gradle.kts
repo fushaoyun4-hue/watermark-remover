@@ -122,4 +122,5 @@ dependencies {
 
 kapt {
     correctErrorTypes = true
+    useBuildCache = true
 }
