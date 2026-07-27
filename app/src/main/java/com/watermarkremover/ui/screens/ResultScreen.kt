@@ -31,7 +31,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
+import java.io.FileOutputStream
+
+import com.watermarkremover.ui.theme.WatermarkRemoverTheme
 
 /**
  * 结果页：处理完成，显示对比，提供保存按钮
