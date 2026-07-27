@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -13,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material3.*
@@ -20,27 +23,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.watermarkremover.inference.VideoProcessor
 import com.watermarkremover.ui.theme.WatermarkRemoverTheme
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import javax.inject.Inject
@@ -51,11 +59,10 @@ import androidx.lifecycle.viewModelScope
  * 编辑页：支持多选框 + 拖拽调整 + 删除单个区域
  *
  * 交互设计：
- * - 拖拽空白区域 → 新增框选
- * - 点击已有框选 → 选中（蓝色高亮）
- * - 拖拽已有框选内部 → 移动位置
- * - 拖拽已有框选边缘 → 调整大小
- * - 点击删除按钮 / 再次点击已选中框 → 删除该框
+ * - 拖拽空白区域 → 新增临时框（蓝色虚线）
+ * - 松手 → 框固定下来并显示 ✅ 确认标记，同时可以继续拖拽新增更多
+ * - 点击未确认的框（蓝色实线）→ 该框进入"已确认"状态，显示 ✅，锁定不可再拖
+ * - 点击已确认的框 → 删除该框
  * - 清除按钮 → 清空所有框
  */
 @HiltViewModel
@@ -63,6 +70,7 @@ class EditorViewModel @Inject constructor(
     private val videoProcessor: VideoProcessor
 ) : ViewModel() {
 
+    /** 归一化坐标的矩形框 */
     data class MaskRect(
         val id: Int,
         var left: Float,   // 归一化 0~1
@@ -70,25 +78,20 @@ class EditorViewModel @Inject constructor(
         var right: Float,
         var bottom: Float
     ) {
-        val width get()  = kotlin.math.abs(right - left)
+        val width  get() = kotlin.math.abs(right - left)
         val height get() = kotlin.math.abs(bottom - top)
         fun toRectF() = android.graphics.RectF(
-            minOf(left, right),
-            minOf(top, bottom),
-            maxOf(left, right),
-            maxOf(top, bottom)
+            minOf(left, right), minOf(top, bottom),
+            maxOf(left, right), maxOf(top, bottom)
         )
     }
 
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
 
-    var selectedMaskId by mutableStateOf<Int?>(null)
+    /** 当前正在拖拽但尚未固定的临时框（null = 没有在画新框） */
+    var pendingMask by mutableStateOf<MaskRect?>(null)
         private set
-
-    fun setSelectedMask(id: Int?) {
-        selectedMaskId = id
-    }
 
     var isProcessing by mutableStateOf(false)
         private set
@@ -104,72 +107,38 @@ class EditorViewModel @Inject constructor(
 
     private var nextId = 0
 
-    /** 新增一个框选 */
-    fun addMask(left: Float, top: Float, right: Float, bottom: Float) {
-        masks = masks + MaskRect(
-            id = nextId++,
-            left = minOf(left, right),
-            top = minOf(top, bottom),
-            right = maxOf(left, right),
-            bottom = maxOf(top, bottom)
-        )
+    /** 在临时框松开时，将其正式加入 masks */
+    fun confirmPendingMask() {
+        val p = pendingMask ?: return
+        if (p.width > 0.02f && p.height > 0.02f) {
+            masks = masks + MaskRect(
+                id = nextId++,
+                left = minOf(p.left, p.right),
+                top  = minOf(p.top, p.bottom),
+                right= maxOf(p.left, p.right),
+                bottom=maxOf(p.top, p.bottom)
+            )
+        }
+        pendingMask = null
     }
 
-    /** 删除指定 id 的框选 */
+    /** 取消当前临时框 */
+    fun cancelPendingMask() {
+        pendingMask = null
+    }
+
+    /** 删除已确认的框 */
     fun removeMask(id: Int) {
         masks = masks.filter { it.id != id }
-        if (selectedMaskId == id) selectedMaskId = null
     }
 
-    /** 删除最后添加的框选 */
-    fun removeLastMask() {
-        if (masks.isNotEmpty()) {
-            val last = masks.last()
-            removeMask(last.id)
-        }
-    }
-
-    /** 清空所有框选 */
+    /** 清空所有已确认框 */
     fun clearMasks() {
         masks = emptyList()
-        selectedMaskId = null
+        pendingMask = null
     }
 
-    /** 选中/取消选中某个框选 */
-    fun toggleSelect(id: Int) {
-        selectedMaskId = if (selectedMaskId == id) null else id
-    }
-
-    /** 移动指定框选（拖拽移动） */
-    fun moveMask(id: Int, deltaX: Float, deltaY: Float) {
-        masks = masks.map { m ->
-            if (m.id == id) {
-                m.copy(
-                    left  = (m.left  + deltaX).coerceIn(0f, 1f),
-                    right = (m.right + deltaX).coerceIn(0f, 1f),
-                    top   = (m.top   + deltaY).coerceIn(0f, 1f),
-                    bottom= (m.bottom+ deltaY).coerceIn(0f, 1f)
-                )
-            } else m
-        }
-    }
-
-    /** 调整指定框选的大小（拖拽边角） */
-    fun resizeMask(id: Int, corner: Corner, deltaX: Float, deltaY: Float) {
-        masks = masks.map { m ->
-            if (m.id == id) {
-                when (corner) {
-                    Corner.TOP_LEFT     -> m.copy(left = (m.left + deltaX).coerceIn(0f, m.right - 0.02f), top = (m.top + deltaY).coerceIn(0f, m.bottom - 0.02f))
-                    Corner.TOP_RIGHT    -> m.copy(right = (m.right + deltaX).coerceIn(m.left + 0.02f, 1f), top = (m.top + deltaY).coerceIn(0f, m.bottom - 0.02f))
-                    Corner.BOTTOM_LEFT  -> m.copy(left = (m.left + deltaX).coerceIn(0f, m.right - 0.02f), bottom = (m.bottom + deltaY).coerceIn(m.top + 0.02f, 1f))
-                    Corner.BOTTOM_RIGHT -> m.copy(right = (m.right + deltaX).coerceIn(m.left + 0.02f, 1f), bottom = (m.bottom + deltaY).coerceIn(m.top + 0.02f, 1f))
-                }
-            } else m
-        }
-    }
-
-    enum class Corner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
-
+    /** 开始处理 */
     fun startProcessing(
         context: android.content.Context,
         mediaUri: Uri,
@@ -183,18 +152,20 @@ class EditorViewModel @Inject constructor(
 
         isProcessing = true
         errorMessage = null
+        progress = 0
+        progressPhase = ""
 
         val androidRects = masks.map { it.toRectF() }
 
         viewModelScope.launch {
             try {
                 if (mediaType == "image") {
-                    val inputStream = context.contentResolver.openInputStream(mediaUri)
-                    val options = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                    // ---- 图片：解码必须在 IO 线程 ----
+                    val bitmap = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(mediaUri)?.use { inputStream ->
+                            BitmapFactory.decodeStream(inputStream)
+                        }
                     }
-                    val bitmap = BitmapFactory.decodeStream(inputStream, null, options)
-                    inputStream?.close()
 
                     if (bitmap == null) {
                         errorMessage = "无法读取图片"
@@ -202,19 +173,29 @@ class EditorViewModel @Inject constructor(
                         return@launch
                     }
 
-                    val result = videoProcessor.processImage(bitmap, androidRects)
+                    // ---- inpaint 在 Default 线程 ----
+                    progressPhase = "正在处理..."
+                    progress = 30
+                    val result = withContext(Dispatchers.Default) {
+                        videoProcessor.processImage(bitmap, androidRects)
+                    }
                     bitmap.recycle()
 
-                    val outputFile = File(context.cacheDir, "result_${System.currentTimeMillis()}.jpg")
-                    FileOutputStream(outputFile).use { fos ->
-                        result.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+                    progress = 80
+                    val outputFile = withContext(Dispatchers.IO) {
+                        File(File(context.cacheDir, "result_${System.currentTimeMillis()}.jpg")).apply {
+                            FileOutputStream(this).use { fos ->
+                                result.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+                            }
+                        }
                     }
                     result.recycle()
-
+                    progress = 100
                     onComplete(mediaUri.toString(), Uri.fromFile(outputFile).toString())
                     isProcessing = false
 
                 } else {
+                    // ---- 视频：Flow collect ----
                     videoProcessor.processVideo(mediaUri, androidRects).collectLatest { state ->
                         when (state) {
                             is VideoProcessor.ProcessState.Progress -> {
@@ -222,6 +203,7 @@ class EditorViewModel @Inject constructor(
                                 progressPhase = state.phase
                             }
                             is VideoProcessor.ProcessState.Success -> {
+                                progress = 100
                                 isProcessing = false
                                 onComplete(mediaUri.toString(), state.outputUri.toString())
                             }
@@ -240,6 +222,10 @@ class EditorViewModel @Inject constructor(
     }
 }
 
+// ────────────────────────────────────────────────────────────
+//  UI 层
+// ────────────────────────────────────────────────────────────
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen(
@@ -253,15 +239,9 @@ fun EditorScreen(
 
     var canvasSize by remember { mutableStateOf(Size.Zero) }
 
-    // 拖拽状态
-    var isDraggingNew by remember { mutableStateOf(false) }
+    // 拖拽新建框的状态
     var dragStart by remember { mutableStateOf(Offset.Zero) }
-    var dragEnd by remember { mutableStateOf(Offset.Zero) }
-
-    // 移动/调整已有框的状态
-    var isDraggingExisting by remember { mutableStateOf(false) }
-    var dragMaskId by remember { mutableStateOf<Int?>(null) }
-    var dragMode by remember { mutableStateOf<DragMode?>(null) }
+    var isDragging by remember { mutableStateOf(false) }
 
     // 视频预览（首帧）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -279,6 +259,15 @@ fun EditorScreen(
     }
 
     WatermarkRemoverTheme {
+        // ---- 处理中进度弹窗 ----
+        if (viewModel.isProcessing) {
+            ProcessingDialog(
+                progress = viewModel.progress,
+                phase = viewModel.progressPhase,
+                onCancel = { /* 暂不支持中途取消 */ }
+            )
+        }
+
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -289,9 +278,13 @@ fun EditorScreen(
                         }
                     },
                     actions = {
-                        // 删除最后一个
+                        // 撤销最后框
                         IconButton(
-                            onClick = { viewModel.removeLastMask() },
+                            onClick = {
+                                if (viewModel.masks.isNotEmpty()) {
+                                    viewModel.removeMask(viewModel.masks.last().id)
+                                }
+                            },
                             enabled = viewModel.masks.isNotEmpty()
                         ) {
                             Icon(Icons.Filled.Delete, contentDescription = "撤销")
@@ -301,7 +294,7 @@ fun EditorScreen(
                             onClick = { viewModel.clearMasks() },
                             enabled = viewModel.masks.isNotEmpty()
                         ) {
-                            Icon(Icons.Filled.DeleteSweep, contentDescription = "清空")
+                            Icon(Icons.Filled.DeleteSweep, contentDescription = "清空全部")
                         }
                     }
                 )
@@ -312,43 +305,42 @@ fun EditorScreen(
                         .fillMaxWidth()
                         .padding(16.dp)
                 ) {
-                    // 选中提示
-                    viewModel.selectedMaskId?.let { selectedId ->
-                        viewModel.masks.find { it.id == selectedId }?.let {
+                    // 错误提示
+                    viewModel.errorMessage?.let { msg ->
+                        Text(
+                            text = "⚠️ $msg",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+
+                    // 状态提示
+                    when {
+                        viewModel.masks.isEmpty() && viewModel.pendingMask == null -> {
                             Text(
-                                text = "✅ 已选中区域 ${viewModel.masks.indexOf(it) + 1}，拖拽可移动，拖拽边缘可调整大小",
+                                text = "👆 在图片上拖动框选水印区域，可选多个",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
+                        viewModel.pendingMask != null -> {
+                            Text(
+                                text = "⏳ 框已画好 ✅ 请继续框选其他区域，或点击「开始去除」",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
                             )
                         }
-                    }
-
-                    // 框选数量提示
-                    if (viewModel.masks.isEmpty()) {
-                        Text(
-                            text = "👆 在图片上拖动框选水印区域（可多选）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                    } else if (viewModel.selectedMaskId == null) {
-                        Text(
-                            text = "已框选 ${viewModel.masks.size} 个区域，点击区域可选中并移动/调整",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                    }
-
-                    // 进度/错误提示
-                    if (!viewModel.errorMessage.isNullOrEmpty()) {
-                        Text(
-                            text = "⚠️ ${viewModel.errorMessage}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
+                        else -> {
+                            Text(
+                                text = "✅ 已框选 ${viewModel.masks.size} 个区域，点击区域可删除",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
                     }
 
                     // 开始按钮
@@ -367,17 +359,7 @@ fun EditorScreen(
                             .height(56.dp),
                         shape = RoundedCornerShape(16.dp)
                     ) {
-                        if (viewModel.isProcessing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text("${viewModel.progressPhase} ${viewModel.progress}%")
-                        } else {
-                            Text("开始去除水印", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Text("开始去除水印", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -399,11 +381,11 @@ fun EditorScreen(
                         }
                         .pointerInput(Unit) {
                             detectTapGestures { offset ->
-                                // 点击已有框 → 选中/取消
                                 val normalized = Offset(
                                     offset.x / canvasSize.width,
                                     offset.y / canvasSize.height
                                 )
+                                // 点击已确认的框 → 删除
                                 val hit = viewModel.masks.find { m ->
                                     normalized.x >= minOf(m.left, m.right) - 0.02f &&
                                     normalized.x <= maxOf(m.left, m.right) + 0.02f &&
@@ -411,99 +393,40 @@ fun EditorScreen(
                                     normalized.y <= maxOf(m.top, m.bottom) + 0.02f
                                 }
                                 if (hit != null) {
-                                    if (viewModel.selectedMaskId == hit.id) {
-                                        // 再次点击已选中框 → 删除
-                                        viewModel.removeMask(hit.id)
-                                    } else {
-                                        viewModel.toggleSelect(hit.id)
-                                    }
-                                } else {
-                                    viewModel.setSelectedMask(null)
+                                    viewModel.removeMask(hit.id)
                                 }
                             }
                         }
                         .pointerInput(Unit) {
                             detectDragGestures(
                                 onDragStart = { offset ->
-                                    val normalized = Offset(
-                                        offset.x / canvasSize.width,
-                                        offset.y / canvasSize.height
-                                    )
-                                    // 检查是否点在某个已有框上（用于移动/调整）
-                                    val hit = viewModel.masks.findLast { m ->
-                                        normalized.x >= minOf(m.left, m.right) - 0.02f &&
-                                        normalized.x <= maxOf(m.left, m.right) + 0.02f &&
-                                        normalized.y >= minOf(m.top, m.bottom) - 0.02f &&
-                                        normalized.y <= maxOf(m.top, m.bottom) + 0.02f
-                                    }
-                                    if (hit != null) {
-                                        isDraggingExisting = true
-                                        dragMaskId = hit.id
-                                        viewModel.setSelectedMask(hit.id)
-                                        // 检测是否在边角（边长 * 0.15 内）
-                                        val w = kotlin.math.abs(hit.right - hit.left)
-                                        val h = kotlin.math.abs(hit.bottom - hit.top)
-                                        val cornerZone = minOf(w, h) * 0.15f
-                                        val lx = normalized.x
-                                        val ly = normalized.y
-                                        val l = minOf(hit.left, hit.right)
-                                        val t = minOf(hit.top, hit.bottom)
-                                        val r = maxOf(hit.left, hit.right)
-                                        val b = maxOf(hit.top, hit.bottom)
-
-                                        val nearLeft   = kotlin.math.abs(lx - l) < cornerZone
-                                        val nearRight  = kotlin.math.abs(lx - r) < cornerZone
-                                        val nearTop    = kotlin.math.abs(ly - t) < cornerZone
-                                        val nearBottom = kotlin.math.abs(ly - b) < cornerZone
-
-                                        dragMode = when {
-                                            nearLeft  && nearTop    -> DragMode.Resize(EditorViewModel.Corner.TOP_LEFT)
-                                            nearRight && nearTop    -> DragMode.Resize(EditorViewModel.Corner.TOP_RIGHT)
-                                            nearLeft  && nearBottom -> DragMode.Resize(EditorViewModel.Corner.BOTTOM_LEFT)
-                                            nearRight && nearBottom -> DragMode.Resize(EditorViewModel.Corner.BOTTOM_RIGHT)
-                                            else                     -> DragMode.Move
-                                        }
-                                    } else {
-                                        // 新建框
-                                        isDraggingNew = true
-                                        dragStart = offset
-                                        dragEnd = offset
-                                    }
+                                    dragStart = offset
+                                    isDragging = true
+                                    // 取消之前的 pending
+                                    viewModel.cancelPendingMask()
                                 },
                                 onDrag = { change, _ ->
-                                    if (isDraggingExisting && dragMaskId != null) {
-                                        val deltaX = change.position.x - change.previousPosition.x
-                                        val deltaY = change.position.y - change.previousPosition.y
-                                        val normDX = deltaX / canvasSize.width
-                                        val normDY = deltaY / canvasSize.height
-                                        when (val mode = dragMode) {
-                                            is DragMode.Move -> viewModel.moveMask(dragMaskId!!, normDX, normDY)
-                                            is DragMode.Resize -> viewModel.resizeMask(dragMaskId!!, mode.corner, normDX, normDY)
-                                            null -> {}
-                                        }
-                                    } else if (isDraggingNew) {
-                                        dragEnd = change.position
-                                    }
+                                    val end = change.position
+                                    val left   = minOf(dragStart.x, end.x)
+                                    val top    = minOf(dragStart.y, end.y)
+                                    val right  = maxOf(dragStart.x, end.x)
+                                    val bottom = maxOf(dragStart.y, end.y)
+                                    viewModel.pendingMask = EditorViewModel.MaskRect(
+                                        id = -1,
+                                        left = left / canvasSize.width,
+                                        top  = top  / canvasSize.height,
+                                        right= right/ canvasSize.width,
+                                        bottom=bottom/ canvasSize.height
+                                    )
                                 },
                                 onDragEnd = {
-                                    if (isDraggingNew) {
-                                        val left   = minOf(dragStart.x, dragEnd.x) / canvasSize.width
-                                        val top    = minOf(dragStart.y, dragEnd.y) / canvasSize.height
-                                        val right  = maxOf(dragStart.x, dragEnd.x) / canvasSize.width
-                                        val bottom = maxOf(dragStart.y, dragEnd.y) / canvasSize.height
-                                        if (right - left > 0.02f && bottom - top > 0.02f) {
-                                            viewModel.addMask(left, top, right, bottom)
-                                        }
-                                    }
-                                    isDraggingNew = false
-                                    isDraggingExisting = false
-                                    dragMaskId = null
-                                    dragMode = null
+                                    isDragging = false
+                                    viewModel.confirmPendingMask()
                                 }
                             )
                         }
                 ) {
-                    // 图片/视频预览
+                    // 媒体预览层
                     if (mediaType == "image") {
                         AsyncImage(
                             model = ImageRequest.Builder(context)
@@ -532,86 +455,75 @@ fun EditorScreen(
 
                     // 蒙版绘制层
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        val cornerHandlePx = 10.dp.toPx()
-                        val borderPx = 2.dp.toPx()
-                        val selectedBorderPx = 3.dp.toPx()
+                        val borderPx    = 2.dp.toPx()
+                        val handlePx    = 8.dp.toPx()
+                        val checkMarkPx = 18.dp.toPx()
 
+                        // ---- 已确认的框：绿色边框 + 右上角勾 ----
                         viewModel.masks.forEach { mask ->
-                            val isSelected = mask.id == viewModel.selectedMaskId
-                            val l = minOf(mask.left, mask.right) * size.width
-                            val t = minOf(mask.top, mask.bottom) * size.height
-                            val r = maxOf(mask.left, mask.right) * size.width
-                            val b = maxOf(mask.top, mask.bottom) * size.height
+                            val l = minOf(mask.left,  mask.right)  * size.width
+                            val t = minOf(mask.top,   mask.bottom) * size.height
+                            val r = maxOf(mask.left,  mask.right)  * size.width
+                            val b = maxOf(mask.top,   mask.bottom) * size.height
                             val w = r - l
                             val h = b - t
 
-                            // 半透明填充
+                            // 半透明绿色填充
                             drawRect(
-                                color = if (isSelected) Color(0xFF2196F3).copy(alpha = 0.25f)
-                                        else Color.Red.copy(alpha = 0.25f),
+                                color = Color(0xFF00C853).copy(alpha = 0.22f),
                                 topLeft = Offset(l, t),
                                 size = Size(w, h)
                             )
+                            // 实线绿色边框
+                            drawRect(
+                                color = Color(0xFF00C853),
+                                topLeft = Offset(l, t),
+                                size = Size(w, h),
+                                style = Stroke(width = borderPx)
+                            )
 
-                            // 虚线边框（未选中）
-                            if (!isSelected) {
-                                drawRect(
-                                    color = Color.Red,
-                                    topLeft = Offset(l, t),
-                                    size = Size(w, h),
-                                    style = Stroke(
-                                        width = borderPx,
-                                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))
-                                    )
-                                )
-                            }
-
-                            // 实线边框（选中）
-                            if (isSelected) {
-                                drawRect(
-                                    color = Color(0xFF2196F3),
-                                    topLeft = Offset(l, t),
-                                    size = Size(w, h),
-                                    style = Stroke(width = selectedBorderPx)
-                                )
-
-                                // 四个角把手
-                                val corners = listOf(
-                                    Offset(l, t), Offset(r, t),
-                                    Offset(l, b), Offset(r, b)
-                                )
-                                corners.forEach { corner ->
-                                    drawCircle(
-                                        color = Color(0xFF2196F3),
-                                        radius = cornerHandlePx,
-                                        center = corner
-                                    )
-                                    drawCircle(
-                                        color = Color.White,
-                                        radius = cornerHandlePx * 0.5f,
-                                        center = corner
-                                    )
-                                }
-                            }
+                            // 右上角 ✅ 勾：中心在矩形右上角内侧
+                            val cx = r - checkMarkPx * 0.9f
+                            val cy = t + checkMarkPx * 0.9f
+                            // 圆形背景
+                            drawCircle(
+                                color = Color(0xFF00C853),
+                                radius = checkMarkPx,
+                                center = Offset(cx, cy)
+                            )
+                            drawCircle(
+                                color = Color.White,
+                                radius = checkMarkPx * 0.7f,
+                                center = Offset(cx, cy)
+                            )
+                            // 勾（简化为一条斜线+圆点表示）
+                            drawCircle(
+                                color = Color(0xFF00C853),
+                                radius = checkMarkPx * 0.35f,
+                                center = Offset(cx, cy)
+                            )
                         }
 
-                        // 当前正在拖拽的新框
-                        if (isDraggingNew) {
-                            val left   = minOf(dragStart.x, dragEnd.x)
-                            val top    = minOf(dragStart.y, dragEnd.y)
-                            val width  = kotlin.math.abs(dragEnd.x - dragStart.x)
-                            val height = kotlin.math.abs(dragEnd.y - dragStart.y)
+                        // ---- 正在拖拽的临时框：蓝色虚线 ----
+                        viewModel.pendingMask?.let { p ->
+                            val l = minOf(p.left, p.right) * size.width
+                            val t = minOf(p.top,  p.bottom) * size.height
+                            val w = kotlin.math.abs(p.right - p.left) * size.width
+                            val h = kotlin.math.abs(p.bottom - p.top) * size.height
 
                             drawRect(
-                                color = Color(0xFF2196F3).copy(alpha = 0.3f),
-                                topLeft = Offset(left, top),
-                                size = Size(width, height)
+                                color = Color(0xFF2196F3).copy(alpha = 0.25f),
+                                topLeft = Offset(l, t),
+                                size = Size(w, h)
                             )
                             drawRect(
                                 color = Color(0xFF2196F3),
-                                topLeft = Offset(left, top),
-                                size = Size(width, height),
-                                style = Stroke(width = 2.dp.toPx())
+                                topLeft = Offset(l, t),
+                                size = Size(w, h),
+                                style = Stroke(
+                                    width = borderPx,
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
+                                )
                             )
                         }
                     }
@@ -621,7 +533,83 @@ fun EditorScreen(
     }
 }
 
-sealed class DragMode {
-    data object Move : DragMode()
-    data class Resize(val corner: EditorViewModel.Corner) : DragMode()
+/**
+ * 动态进度弹窗（仿"开拍"风格）
+ * - 卡片居中，圆角
+ * - 标题 + 百分比数字
+ * - LinearProgressIndicator 进度条
+ * - 阶段文字
+ */
+@Composable
+fun ProcessingDialog(
+    progress: Int,
+    phase: String,
+    onCancel: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = { /* 不允许点击外部关闭 */ },
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth(0.82f)
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // 标题
+                Text(
+                    text = "正在处理",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // 百分比数字（大字号）
+                Text(
+                    text = "$progress%",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 进度条
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 阶段描述
+                Text(
+                    text = phase.ifEmpty { "准备中..." },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
 }
