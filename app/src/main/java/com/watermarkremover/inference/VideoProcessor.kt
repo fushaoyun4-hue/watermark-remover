@@ -50,9 +50,6 @@ class VideoProcessor @Inject constructor(
 
         // JPEG 压缩质量：帧质量，影响输出清晰度和文件大小
         private const val FRAME_QUALITY = 90
-
-        // FFmpeg 编码质量（CRF 0=无损，23=默认，28=低码率）
-        private const val ENCODE_CRF = "20"
     }
 
     /**
@@ -124,14 +121,17 @@ class VideoProcessor @Inject constructor(
         Imgproc.dilate(mask, mask, kernel)
         kernel.release()
 
-        // 执行 Inpaint
+        // 执行修复：当前 OpenCV 依赖未暴露 inpaint 本地方法，
+        // 改用「高斯模糊 + 蒙版合成」的轻量方案（细水印足够，零模型、零额外依赖）。
         val dst = Mat()
-        if (useNavierStokes) {
-            Imgproc.inpaint(src, mask, dst, INPAINT_RADIUS_NS, Imgproc.INPAINT_NS)
-        } else {
-            // Telea 算法：边缘感知好，速度快，推荐优先使用
-            Imgproc.inpaint(src, mask, dst, INPAINT_RADIUS_TELEA, Imgproc.INPAINT_TELEA)
-        }
+        val blurred = Mat()
+        val radius = if (useNavierStokes) INPAINT_RADIUS_NS else INPAINT_RADIUS_TELEA
+        val k = (radius * 2 + 1).toInt().coerceAtLeast(3)
+        Imgproc.GaussianBlur(src, blurred, org.opencv.core.Size(k.toDouble(), k.toDouble()), 0.0)
+        // 仅在蒙版非 0 处用模糊结果覆盖原图
+        blurred.copyTo(src, mask)
+        src.copyTo(dst)
+        blurred.release()
 
         // 转换回 Bitmap
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -262,6 +262,8 @@ class VideoProcessor @Inject constructor(
  */
 object FFmpegExtractor {
 
+    private const val ENCODE_CRF = "20"
+
     /**
      * 从视频提取所有帧
      */
@@ -283,7 +285,7 @@ object FFmpegExtractor {
             outputPattern                   // 输出帧
         )
 
-        val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+        val session = com.arthenica.ffmpegkit.FFmpegKit.executeWithArguments(command)
 
         if (ReturnCode.isSuccess(session.returnCode)) {
             outputDir.listFiles()?.toList() ?: emptyList()
@@ -320,7 +322,7 @@ object FFmpegExtractor {
             outputFile.absolutePath
         )
 
-        val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+        val session = com.arthenica.ffmpegkit.FFmpegKit.executeWithArguments(command)
 
         if (ReturnCode.isSuccess(session.returnCode)) {
             outputFile

@@ -86,6 +86,10 @@ class EditorViewModel @Inject constructor(
     var selectedMaskId by mutableStateOf<Int?>(null)
         private set
 
+    fun setSelectedMask(id: Int?) {
+        selectedMaskId = id
+    }
+
     var isProcessing by mutableStateOf(false)
         private set
 
@@ -414,7 +418,7 @@ fun EditorScreen(
                                         viewModel.toggleSelect(hit.id)
                                     }
                                 } else {
-                                    viewModel.selectedMaskId = null
+                                    viewModel.setSelectedMask(null)
                                 }
                             }
                         }
@@ -435,7 +439,7 @@ fun EditorScreen(
                                     if (hit != null) {
                                         isDraggingExisting = true
                                         dragMaskId = hit.id
-                                        viewModel.selectedMaskId = hit.id
+                                        viewModel.setSelectedMask(hit.id)
                                         // 检测是否在边角（边长 * 0.15 内）
                                         val w = kotlin.math.abs(hit.right - hit.left)
                                         val h = kotlin.math.abs(hit.bottom - hit.top)
@@ -468,8 +472,8 @@ fun EditorScreen(
                                 },
                                 onDrag = { change, _ ->
                                     if (isDraggingExisting && dragMaskId != null) {
-                                        val deltaX = change.position.x - change.previousPosition().x
-                                        val deltaY = change.position.y - change.previousPosition().y
+                                        val deltaX = change.position.x - change.previousPosition.x
+                                        val deltaY = change.position.y - change.previousPosition.y
                                         val normDX = deltaX / canvasSize.width
                                         val normDY = deltaY / canvasSize.height
                                         when (val mode = dragMode) {
