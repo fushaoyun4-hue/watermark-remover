@@ -43,9 +43,6 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
-          echo "::group::=== Build log tail ==="
-          tail -20 build.log
-          echo "::endgroup::"
         env:
           JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
@@ -57,17 +54,20 @@ jobs:
           if [ -f build.log ]; then
             SZ=$(wc -c < build.log)
             echo "::error::build.log size=${SZ} bytes"
-            echo "::error::=== Last 80 lines ==="
-            tail -80 build.log | while IFS= read -r line; do echo "::error::$line"; done
-            echo "::error::=== Kotlin errors (e:) ==="
-            grep "^e:" build.log | head -30 | while IFS= read -r line; do echo "::error::$line"; done
-            echo "::error::=== What went wrong ==="
-            awk '/What went wrong/{f=1} f{print} /\* Try:/{exit}' build.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+<<<<<<< HEAD
+            if [ "$SZ" -eq 0 ]; then
+              echo "::error::build.log EMPTY - gradle produced no captured output"
+            else
+              echo "::error::=== Kotlin errors (e:) ==="
+              grep -E "^e:" build.log | head -n 40 | while IFS= read -r line; do echo "::error::$line"; done
+              echo "::error::=== What went wrong ==="
+              awk '/What went wrong/{f=1} f{print} /\* Try:/{exit}' build.log | tail -n 15 | while IFS= read -r line; do echo "::error::$line"; done
+            fi
           else
             echo "::error::build.log MISSING"
           fi
           mkdir -p ci_artifacts
-          { [ -f build.log ] && tail -c 25000 build.log || echo "build.log MISSING"; } > ci_artifacts/ci_error.txt
+          { [ -f build.log ] && tail -c 30000 build.log || echo "build.log MISSING"; } > ci_artifacts/ci_error.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
