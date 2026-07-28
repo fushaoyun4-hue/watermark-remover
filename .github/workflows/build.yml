@@ -54,7 +54,6 @@ jobs:
           if [ -f build.log ]; then
             SZ=$(wc -c < build.log)
             echo "::error::build.log size=${SZ} bytes"
-<<<<<<< HEAD
             if [ "$SZ" -eq 0 ]; then
               echo "::error::build.log EMPTY - gradle produced no captured output"
             else
@@ -91,14 +90,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-# ========= 本地构建说明 (Codespace 开发模式) =========
+# ========= 本地构建说明 (Codespace 开发模�? =========
 #
-# 本项目设计为在 GitHub Codespace 中开发构建：
+# 本项目设计为�?GitHub Codespace 中开发构建：
 #
 # 1. 打开仓库 -> 点击 "Code" -> "Create codespace on master"
-# 2. Codespace 预装 Android SDK 和 JDK 17 (2核4GB免费)
-# 3. 在终端运行: ./gradlew assembleDebug
-# 4. APK 输出到: app/build/outputs/apk/debug/*.apk
+# 2. Codespace 预装 Android SDK �?JDK 17 (2�?GB免费)
+# 3. 在终端运�? ./gradlew assembleDebug
+# 4. APK 输出�? app/build/outputs/apk/debug/*.apk
 #
 # 本地电脑只需: git push / git pull (8GB核显无法本地编译)
 #
