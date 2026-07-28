@@ -21,7 +21,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.awaitEachGesture
+import androidx.compose.ui.input.pointer.awaitPointerEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -113,6 +116,10 @@ class EditorViewModel @Inject constructor(
 
     fun cancelPendingMask() {
         pendingMask = null
+    }
+
+    fun setPendingMask(m: MaskRect?) {
+        pendingMask = m
     }
 
     fun removeMask(id: Int) {
@@ -382,16 +389,16 @@ fun EditorScreen(
                                     var dragEnded = false
                                     while (!dragEnded) {
                                         val event = awaitPointerEvent()
-                                        event.changes.forEach { it.consume() }
+                                        event.changes.forEach { ch -> ch.consume() }
                                         val pos = event.changes.first().position
-                                        viewModel.pendingMask = EditorViewModel.MaskRect(
+                                        viewModel.setPendingMask(EditorViewModel.MaskRect(
                                             id = -1,
                                             left   = minOf(dragStart.x, pos.x) / canvasSize.width,
                                             top    = minOf(dragStart.y, pos.y) / canvasSize.height,
                                             right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
                                             bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
-                                        )
-                                        if (!event.changes.any { it.pressed }) {
+                                        ))
+                                        if (!event.changes.any { ch -> ch.pressed }) {
                                             dragEnded = true
                                             viewModel.confirmPendingMask()
                                         }
