@@ -117,8 +117,8 @@ class EditorViewModel @Inject constructor(
         pendingMask = null
     }
 
-    fun setPendingMask(m: MaskRect?) {
-        pendingMask = m
+    fun updatePendingMask(rect: MaskRect?) {
+        pendingMask = rect
     }
 
     fun removeMask(id: Int) {
@@ -390,7 +390,7 @@ fun EditorScreen(
                                         val event = awaitPointerEvent()
                                         event.changes.forEach { ch -> ch.consume() }
                                         val pos = event.changes.first().position
-                                        viewModel.setPendingMask(EditorViewModel.MaskRect(
+                                        viewModel.updatePendingMask(EditorViewModel.MaskRect(
                                             id = -1,
                                             left   = minOf(dragStart.x, pos.x) / canvasSize.width,
                                             top    = minOf(dragStart.y, pos.y) / canvasSize.height,
