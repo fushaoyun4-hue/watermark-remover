@@ -40,16 +40,20 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
 
       - name: Capture build error
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log || true
           mkdir -p ci_artifacts
-          { [ -f build.log ] && tail -c 40000 build.log || echo "build.log MISSING"; } > ci_artifacts/ci_error.txt
+          if [ -s build.log ]; then
+            cp build.log ci_artifacts/ci_error.txt
+          else
+            echo "build.log MISSING or EMPTY at capture time" > ci_artifacts/ci_error.txt
+            ./gradlew assembleDebug --no-daemon 2>&1 | tee -a ci_artifacts/ci_error.txt || true
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
