@@ -42,7 +42,10 @@ jobs:
       - name: Build Debug APK
         run: |
           set -o pipefail
-          ./gradlew assembleDebug --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
+          ./gradlew assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+          echo "::group::=== Build log tail ==="
+          tail -20 build.log
+          echo "::endgroup::"
         env:
           JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
@@ -54,15 +57,14 @@ jobs:
           if [ -f build.log ]; then
             SZ=$(wc -c < build.log)
             echo "::error::build.log size=${SZ} bytes"
-            if [ "$SZ" -eq 0 ]; then
-              echo "::error::build.log EMPTY - gradle produced no captured output"
-            else
-              awk '/What went wrong/{f=1} f{print} /\* Try:/{exit}' build.log | tail -n 12 | while IFS= read -r line; do echo "::error::$line"; done
-              echo "::error::--- Caused by chain ---"
-              grep -E "Caused by:|OutOfMemoryError|Exception in thread|InvocationTargetException" build.log | tail -n 12 | while IFS= read -r line; do echo "::error::$line"; done
-            fi
+            echo "::error::=== Last 80 lines ==="
+            tail -80 build.log | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::=== Kotlin errors (e:) ==="
+            grep "^e:" build.log | head -30 | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::=== What went wrong ==="
+            awk '/What went wrong/{f=1} f{print} /\* Try:/{exit}' build.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
           else
-            echo "::error::build.log MISSING - Build step did not create it"
+            echo "::error::build.log MISSING"
           fi
           mkdir -p ci_artifacts
           { [ -f build.log ] && tail -c 25000 build.log || echo "build.log MISSING"; } > ci_artifacts/ci_error.txt

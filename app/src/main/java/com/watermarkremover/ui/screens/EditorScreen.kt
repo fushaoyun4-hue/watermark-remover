@@ -555,7 +555,7 @@ fun ProcessingDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 LinearProgressIndicator(
-                    progress = { progress / 100f },
+                    progress = { (progress / 100f).coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(10.dp),
