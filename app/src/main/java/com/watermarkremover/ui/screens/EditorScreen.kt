@@ -28,7 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -446,47 +446,41 @@ fun EditorScreen(
                             canvasSize = Size(size.width.toFloat(), size.height.toFloat())
                         }
                         .pointerInput(Unit) {
-                            awaitEachGesture {
-                                val down = awaitPointerEvent()
-                                val startPos = down.changes.first().position
-                                val nx0 = startPos.x / canvasSize.width
-                                val ny0 = startPos.y / canvasSize.height
-
-                                val hitMask = viewModel.masks.find { m ->
-                                    nx0 >= minOf(m.left, m.right) - 0.02f &&
-                                    nx0 <= maxOf(m.left, m.right) + 0.02f &&
-                                    ny0 >= minOf(m.top,  m.bottom) - 0.02f &&
-                                    ny0 <= maxOf(m.top,  m.bottom) + 0.02f
-                                }
-
-                                if (hitMask != null) {
-                                    // 点击已确认框 → 删除
-                                    viewModel.removeMask(hitMask.id)
-                                } else {
-                                    // 空白处开始拖拽新建框
-                                    dragStart = startPos
-                                    viewModel.cancelPendingMask()
-
-                                    var dragEnded = false
-                                    while (!dragEnded) {
-                                        val event = awaitPointerEvent()
-                                        event.changes.forEach { ch -> ch.consume() }
-                                        val pos = event.changes.first().position
-                                        viewModel.updatePendingMask(EditorViewModel.MaskRect(
-                                            id = -1,
-                                            left   = minOf(dragStart.x, pos.x) / canvasSize.width,
-                                            top    = minOf(dragStart.y, pos.y) / canvasSize.height,
-                                            right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
-                                            bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
-                                        ))
-                                        if (!event.changes.any { ch -> ch.pressed }) {
-                                            dragEnded = true
-                                            // 不自动确认，等用户点勾选
-                                            viewModel.confirmPendingMask()
-                                        }
+                            detectDragGestures(
+                                onDragStart = { startPos ->
+                                    val nx0 = startPos.x / canvasSize.width
+                                    val ny0 = startPos.y / canvasSize.height
+                                    val hitMask = viewModel.masks.find { m ->
+                                        nx0 >= minOf(m.left, m.right) - 0.02f &&
+                                        nx0 <= maxOf(m.left, m.right) + 0.02f &&
+                                        ny0 >= minOf(m.top,  m.bottom) - 0.02f &&
+                                        ny0 <= maxOf(m.top,  m.bottom) + 0.02f
                                     }
+                                    if (hitMask != null) {
+                                        // 点击已确认框 → 删除
+                                        viewModel.removeMask(hitMask.id)
+                                    } else {
+                                        // 空白处开始拖拽新建框
+                                        dragStart = startPos
+                                        viewModel.cancelPendingMask()
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val pos = change.position
+                                    viewModel.updatePendingMask(EditorViewModel.MaskRect(
+                                        id = -1,
+                                        left   = minOf(dragStart.x, pos.x) / canvasSize.width,
+                                        top    = minOf(dragStart.y, pos.y) / canvasSize.height,
+                                        right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
+                                        bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
+                                    ))
+                                },
+                                onDragEnd = {
+                                    // 不自动确认，等用户点勾选
+                                    viewModel.confirmPendingMask()
                                 }
-                            }
+                            )
                         }
                 ) {
                     // 媒体预览层
