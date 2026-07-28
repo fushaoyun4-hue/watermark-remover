@@ -40,6 +40,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Debug APK
+        id: build_step
         run: ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
 
       - name: Capture build error
@@ -60,17 +61,6 @@ jobs:
           git add ci_artifacts/ci_error.txt 2>/dev/null
           git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
           git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
-
-      - name: Verify APK files exist
-        run: |
-          echo "Checking APK output directory..."
-          ls -la app/build/outputs/apk/debug/ 2>&1 || { echo "APK directory not found!"; exit 1; }
-          count=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | wc -l)
-          echo "Found $count APK files"
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: No APK files generated!"
-            exit 1
-          fi
 
       - name: Upload Debug APK
         if: success()
@@ -96,3 +86,44 @@ jobs:
             app/build/outputs/apk/debug/app-universal-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    # Only run if build succeeded (needs.build.result == 'success')
+    if: needs.build.result == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify APK files exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Checking app/build directory ==="
+          find app/build -type f -name "*.apk" 2>&1 | head -20 || echo "No APKs found anywhere"
+          echo "=== Checking app/build/outputs directory ==="
+          ls -laR app/build/outputs/ 2>&1 || echo "outputs directory missing"
+          echo "=== APK debug directory ==="
+          ls -la app/build/outputs/apk/debug/ 2>&1 || echo "APK debug dir missing"
+          count=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | wc -l)
+          echo "Found $count APK files"
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: No APK files generated! Full build dir:"
+            find app/build -type f 2>&1 | head -50
+            # Commit diagnostic info
+            mkdir -p ci_artifacts
+            echo "=== CI diagnostic ===" > ci_artifacts/ci_error.txt
+            echo "Build succeeded but no APKs found" >> ci_artifacts/ci_error.txt
+            find app/build -type f 2>&1 | head -50 >> ci_artifacts/ci_error.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+            git add ci_artifacts/ci_error.txt 2>/dev/null
+            git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
+            git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
+            exit 1
+          fi
+          echo "✅ All APK files verified!"
