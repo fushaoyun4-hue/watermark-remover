@@ -80,6 +80,16 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    // ABI 分割 - 每个 APK 只包含一种架构，大幅减少体积
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true  // 同时生成通用 APK（包含所有架构）
+        }
+    }
 }
 
 dependencies {
