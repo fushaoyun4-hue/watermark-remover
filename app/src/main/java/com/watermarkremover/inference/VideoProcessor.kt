@@ -19,6 +19,7 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import org.opencv.photo.Photo
 import java.io.File
+import java.io.File
 import java.io.FileOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -350,18 +351,36 @@ object FFmpegExtractor {
 
     /**
      * 从 Content URI 获取真实文件路径
+     * - 如果是 file:// URI，直接返回路径
+     * - 如果是 content:// URI（Android 10+），复制到临时文件后返回临时文件路径
      */
     private fun getPathFromUri(context: Context, uri: Uri): String? {
+        // file:// URI
+        if (uri.scheme == "file") {
+            return uri.path
+        }
+        // content:// URI → 复制到临时文件
         return try {
-            val cursor = context.contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val index = it.getColumnIndex("_data")
-                    if (index >= 0) it.getString(index) else uri.path
-                } else uri.path
-            } ?: uri.path
+            val tempFile = File(context.cacheDir, "temp_media_${System.currentTimeMillis()}")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            tempFile.absolutePath
         } catch (e: Exception) {
-            uri.path
+            // fallback：尝试传统方法
+            try {
+                val cursor = context.contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val index = it.getColumnIndex("_data")
+                        if (index >= 0) it.getString(index) else uri.path
+                    } else uri.path
+                } ?: uri.path
+            } catch (e2: Exception) {
+                uri.path
+            }
         }
     }
 }
