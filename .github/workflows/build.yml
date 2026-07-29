@@ -23,15 +23,8 @@ jobs:
           java-version: '17'
           distribution: temurin
 
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Create local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -39,79 +32,50 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: List Gradle projects & APK tasks
-        run: |
-          echo "=== Available projects ==="
-          ./gradlew projects --no-daemon 2>&1 | head -20
-          echo "=== APK-related tasks ==="
-          ./gradlew tasks --group=build --no-daemon 2>&1 | grep -i apk || echo "No apk tasks found"
+      - name: List Gradle projects
+        run: ./gradlew projects --no-daemon 2>&1 | head -30
 
-      - name: Build Debug APK
+      - name: Build Debug APK with verbose output
         id: build_step
         run: |
-          ./gradlew clean assembleDebug --no-daemon --info 2>&1 | tee build.log | tail -100
-          echo "=== Exit code: $? ==="
+          echo "=== Running: ./gradlew clean assembleDebug --no-daemon --stacktrace ==="
+          ./gradlew clean assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          echo "=== Gradle exit code: $? ==="
 
-      - name: Capture build error
-        if: failure()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Show build log tail
         run: |
-          mkdir -p ci_artifacts
-          cp build.log ci_artifacts/ci_error.txt || true
-          echo "=== APK debug dir ===" >> ci_artifacts/ci_error.txt
-          ls -laR app/build/outputs/apk/debug/ >> ci_artifacts/ci_error.txt 2>&1 || true
-          echo "=== All APK files ===" >> ci_artifacts/ci_error.txt
-          find app/build -name "*.apk" >> ci_artifacts/ci_error.txt 2>&1 || true
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/ci_error.txt 2>/dev/null || true
-          git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
-          git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
+          echo "=== Last 50 lines of build.log ==="
+          tail -50 build.log
 
-      - name: Diagnose build output
+      - name: Find all APK files
         run: |
-          echo "=== Build log last 30 lines ==="
-          tail -30 build.log
-          echo "=== Full app/build directory tree ==="
-          find app/build -type f 2>&1 | head -100
-          echo "=== app/build/outputs directory ==="
-          ls -laR app/build/outputs/ 2>&1 || echo "Directory NOT found"
-          echo "=== Find ALL .apk in entire project ==="
+          echo "=== Find all .apk files in entire project ==="
           find . -name "*.apk" -type f 2>&1
           echo "=== APK count ==="
           find . -name "*.apk" -type f | wc -l
 
+      - name: List app/build/outputs
+        run: ls -laR app/build/outputs/ 2>&1 || echo "app/build/outputs NOT found"
+
       - name: Upload Debug APKs
         if: steps.build_step.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apks-${{ github.run_id }}
+          name: debug-apks
           path: |
-            app/build/outputs/apk/debug/
-            app/build/outputs/apk/release/
-            **/*.apk
-          if-no-files-found: warn
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
-      - name: Upload Debug APKs
-        if: steps.build_step.conclusion == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-apks-${{ github.run_id }}
-          path: app/build/outputs/apk/debug/
-
-      - name: Publish to GitHub Release
+      - name: Create GitHub Release
         if: steps.build_step.conclusion == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: debug-${{ github.sha }}
           name: Debug APK (${{ github.sha }})
-          body: |
-            Built from `${{ github.sha }}`
+          body: "Debug APK built from `${{ github.sha }}`"
           draft: false
           prerelease: true
-          files: |
-            app/build/outputs/apk/debug/*.apk
+          files: app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
