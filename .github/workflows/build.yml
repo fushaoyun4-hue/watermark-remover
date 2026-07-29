@@ -76,12 +76,20 @@ jobs:
           echo "=== APK count ==="
           find app/build -name "*.apk" -type f 2>&1 | wc -l
 
-      - name: Upload Debug APK
+      - name: Upload Debug APK (arm64)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: app/build/outputs/apk/debug/com.watermarkremover-*-debug.apk
+          name: debug-apk-arm64
+          path: app/build/outputs/apk/debug/com.watermarkremover-arm64-v8a-debug.apk
+          retention-days: 30
+
+      - name: Upload Debug APK (universal)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk-universal
+          path: app/build/outputs/apk/debug/com.watermarkremover-universal-debug.apk
           retention-days: 30
 
       - name: Publish to GitHub Release
@@ -95,9 +103,6 @@ jobs:
           prerelease: true
           files: |
             app/build/outputs/apk/debug/com.watermarkremover-arm64-v8a-debug.apk
-            app/build/outputs/apk/debug/com.watermarkremover-armeabi-v7a-debug.apk
-            app/build/outputs/apk/debug/com.watermarkremover-x86-debug.apk
-            app/build/outputs/apk/debug/com.watermarkremover-x86_64-debug.apk
             app/build/outputs/apk/debug/com.watermarkremover-universal-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
