@@ -34,9 +34,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            // 仅当 storeFile 存在时启用 release 签名，否则 fallback 到 unsigned
+            // TODO: 打包上架前重新启用 minify
+            // isMinifyEnabled = true
+            // isShrinkResources = true
+            isMinifyEnabled = false
+            isShrinkResources = false
+            // 仅当 storeFile 存在时启用 release 签名，否则 fallback 到 debug 签名
             val signingFile = System.getenv("SIGNING_KEY_FILE")
             signingConfig = if (!signingFile.isNullOrEmpty()) {
                 signingConfigs.getByName("release")
