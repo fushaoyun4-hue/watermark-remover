@@ -54,7 +54,13 @@ jobs:
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           echo "=== Building $BUILD_TYPE APK ==="
           ./gradlew assemble${{ inputs.build_type || 'Release' }} --no-daemon --stacktrace 2>&1 | tee build.log
-          echo "=== Gradle exit code: $? ==="
+          EXIT_CODE=$?
+          echo "=== Gradle exit code: $EXIT_CODE ==="
+          echo "=== app/build directory (first 100 lines) ==="
+          find app/build -type f 2>&1 | head -100 || echo "app/build is EMPTY or MISSING"
+          echo "=== APK count in app/build ==="
+          find app/build -name "*.apk" | wc -l
+          if [ $EXIT_CODE -ne 0 ]; then echo "Build FAILED"; exit $EXIT_CODE; fi
 
       - name: Show build log tail
         if: always()
