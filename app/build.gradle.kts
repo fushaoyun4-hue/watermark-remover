@@ -39,12 +39,14 @@ android {
             // isShrinkResources = true
             isMinifyEnabled = false
             isShrinkResources = false
-            // 仅当 storeFile 存在时启用 release 签名，否则 fallback 到 debug 签名
+            // 仅当 storeFile 存在时启用 release 签名
+            // AGP 8.x: signingConfigs.getByName("debug") 且 storeFile=null 会导致 APK 不生成
+            // -> 无签名时改为 signingConfig = null（AGP 8.x 行为变化，不再自动 fallback）
             val signingFile = System.getenv("SIGNING_KEY_FILE")
             signingConfig = if (!signingFile.isNullOrEmpty()) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                null  // AGP 8.x: 无 storeFile 时设为 null，不要引用 debug（它也不会 fallback）
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

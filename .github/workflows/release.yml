@@ -54,8 +54,8 @@ jobs:
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           GRADLE_TASK="assemble${{ inputs.build_type || 'Release' }}"
           if [ "$BUILD_TYPE" = "release" ]; then
-            echo "=== WARNING: release build has null storeFile, switching to assembleDebug ==="
-            GRADLE_TASK="assembleDebug"
+            echo "=== Release build: signingConfig=null (unsigned), AGP 8.x handles this correctly ==="
+            GRADLE_TASK="assembleRelease"
           fi
           echo "=== Listing all Gradle tasks ==="
           ./gradlew tasks --all 2>&1 | grep -E "(assemble|APK|apk)" | head -30
@@ -100,7 +100,7 @@ jobs:
           draft: false
           prerelease: true
           files: |
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -108,9 +108,9 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: apk-debug-${{ github.run_id }}
+          name: apk-release-${{ github.run_id }}
           path: |
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
       - name: Capture build error details
@@ -119,33 +119,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ci_artifacts
-          # Always create error.log first (even if empty)
+          # build.log is from the previous step that already ran (uses tee)
           {
-            echo "=== GRADLE BUILD LOG TAIL ==="
-            if [ -f build.log ]; then tail -100 build.log; else echo "build.log NOT FOUND"; fi
+            echo "=== GRADLE BUILD LOG (last 200 lines) ==="
+            if [ -f build.log ]; then tail -200 build.log; else echo "build.log NOT FOUND"; fi
             echo ""
-            echo "=== GRADLE TASKS (assemble/APK) ==="
-            ./gradlew tasks --all 2>&1 | grep -E "assemble|APK" | head -30
-            echo ""
-            echo "=== APK FILES ==="
+            echo "=== APK FILES (find across entire repo) ==="
             find . -name "*.apk" -type f 2>&1 || echo "No APKs"
             echo ""
-            echo "=== app/build/outputs ==="
+            echo "=== app/build/outputs directory ==="
             ls -laR app/build/outputs/ 2>&1 || echo "NOT FOUND"
+            echo ""
+            echo "=== app/build directory (top-level) ==="
+            ls -laR app/build/ 2>&1 | head -50 || echo "NOT FOUND"
             echo ""
             echo "=== gradle.properties ==="
             cat gradle.properties 2>&1 || echo "NOT FOUND"
             echo ""
-            echo "=== signingConfigs in build.gradle.kts ==="
+            echo "=== signingConfigs in app/build.gradle.kts ==="
             grep -C 5 "signing" app/build.gradle.kts 2>&1 || echo "NOT FOUND"
+            echo ""
+            echo "=== buildTypes in app/build.gradle.kts ==="
+            grep -C 3 "buildType" app/build.gradle.kts 2>&1 || echo "NOT FOUND"
           } > ci_artifacts/error.log
-          echo "=== Error log created, file size: $(wc -c < ci_artifacts/error.log) bytes ==="
+          echo "Error log size: $(wc -c < ci_artifacts/error.log) bytes"
+          echo "First 500 chars:"
+          head -c 500 ci_artifacts/error.log
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
           git add ci_artifacts/error.log
-          git commit -m "ci: build error log for run ${{ github.run_id }}"
-          echo "=== Commit result: ==="
-          git log -1 --oneline
+          git commit -m "ci: build error log run ${{ github.run_id }}"
+          echo "Committed: $(git log -1 --format='%H %s')"
           git push -f origin HEAD:ci-debug
-          echo "=== Pushed to ci-debug ==="
+          echo "Pushed to ci-debug."
