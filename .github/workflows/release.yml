@@ -119,12 +119,33 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ci_artifacts
-          { [ -f build.log ] && tail -c 40000 build.log || echo "build.log MISSING"; } > ci_artifacts/build_error.log 2>&1 || true
-          find . -name "*.apk" -type f >> ci_artifacts/build_error.log 2>&1 || true
-          ls -laR app/build/outputs/ >> ci_artifacts/build_error.log 2>&1 || true
+          # Always create error.log first (even if empty)
+          {
+            echo "=== GRADLE BUILD LOG TAIL ==="
+            if [ -f build.log ]; then tail -100 build.log; else echo "build.log NOT FOUND"; fi
+            echo ""
+            echo "=== GRADLE TASKS (assemble/APK) ==="
+            ./gradlew tasks --all 2>&1 | grep -E "assemble|APK" | head -30
+            echo ""
+            echo "=== APK FILES ==="
+            find . -name "*.apk" -type f 2>&1 || echo "No APKs"
+            echo ""
+            echo "=== app/build/outputs ==="
+            ls -laR app/build/outputs/ 2>&1 || echo "NOT FOUND"
+            echo ""
+            echo "=== gradle.properties ==="
+            cat gradle.properties 2>&1 || echo "NOT FOUND"
+            echo ""
+            echo "=== signingConfigs in build.gradle.kts ==="
+            grep -C 5 "signing" app/build.gradle.kts 2>&1 || echo "NOT FOUND"
+          } > ci_artifacts/error.log
+          echo "=== Error log created, file size: $(wc -c < ci_artifacts/error.log) bytes ==="
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/build_error.log 2>/dev/null || true
-          git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
-          git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
+          git add ci_artifacts/error.log
+          git commit -m "ci: build error log for run ${{ github.run_id }}"
+          echo "=== Commit result: ==="
+          git log -1 --oneline
+          git push -f origin HEAD:ci-debug
+          echo "=== Pushed to ci-debug ==="
