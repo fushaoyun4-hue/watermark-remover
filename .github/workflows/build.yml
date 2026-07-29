@@ -41,7 +41,7 @@ jobs:
 
       - name: Build Debug APK
         id: build_step
-        run: ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
+        run: ./gradlew clean assembleDebug --no-daemon 2>&1 | tee build.log
 
       - name: Capture build error
         if: failure()
