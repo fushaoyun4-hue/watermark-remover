@@ -51,25 +51,23 @@ jobs:
       - name: Build APK
         id: build
         run: |
-          # CI uses 'release' build type but release signing config has null storeFile in AGP 8.x
-          # -> fall back to assembleDebug which has a valid default debug keystore
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           GRADLE_TASK="assemble${{ inputs.build_type || 'Release' }}"
           if [ "$BUILD_TYPE" = "release" ]; then
-            echo "=== WARNING: release build has invalid signing config in CI, switching to debug ==="
+            echo "=== WARNING: release build has null storeFile, switching to assembleDebug ==="
             GRADLE_TASK="assembleDebug"
           fi
-          echo "=== Building $GRADLE_TASK ==="
-          ./gradlew $GRADLE_TASK --no-daemon --stacktrace 2>&1 | tee build.log
-          EXIT_CODE=$?
-          echo "=== Gradle exit code: $EXIT_CODE ==="
-          echo "=== All files in app/build (first 100) ==="
-          find app/build -type f 2>&1 | head -100 || echo "app/build is EMPTY or MISSING"
-          echo "=== APK count in app/build ==="
-          find app/build -name "*.apk" | wc -l
-          echo "=== APK files with sizes ==="
-          find app/build -name "*.apk" -exec ls -lh {} \; 2>&1 || echo "No APKs found"
-          if [ $EXIT_CODE -ne 0 ]; then echo "Build FAILED"; exit $EXIT_CODE; fi
+          echo "=== Listing all Gradle tasks ==="
+          ./gradlew tasks --all 2>&1 | grep -E "(assemble|APK|apk)" | head -30
+          echo "=== Building $GRADLE_TASK with --rerun-tasks ==="
+          ./gradlew $GRADLE_TASK --no-daemon --rerun-tasks --stacktrace 2>&1 | tee build.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "=== Gradle PIPESTATUS: $EXIT_CODE ==="
+          echo "=== Full app/build directory ==="
+          find app/build -type f 2>&1
+          echo "=== APK files ==="
+          find . -name "*.apk" -type f 2>&1
+          if [ $EXIT_CODE -ne 0 ]; then echo "Build FAILED with code $EXIT_CODE"; exit $EXIT_CODE; fi
 
       - name: Show build log tail
         if: always()
