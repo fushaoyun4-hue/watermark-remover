@@ -51,9 +51,16 @@ jobs:
       - name: Build APK
         id: build
         run: |
+          # CI uses 'release' build type but release signing config has null storeFile in AGP 8.x
+          # -> fall back to assembleDebug which has a valid default debug keystore
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
-          echo "=== Building $BUILD_TYPE APK ==="
-          ./gradlew assemble${{ inputs.build_type || 'Release' }} --no-daemon --stacktrace 2>&1 | tee build.log
+          GRADLE_TASK="assemble${{ inputs.build_type || 'Release' }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            echo "=== WARNING: release build has invalid signing config in CI, switching to debug ==="
+            GRADLE_TASK="assembleDebug"
+          fi
+          echo "=== Building $GRADLE_TASK ==="
+          ./gradlew $GRADLE_TASK --no-daemon --stacktrace 2>&1 | tee build.log
           EXIT_CODE=$?
           echo "=== Gradle exit code: $EXIT_CODE ==="
           echo "=== All files in app/build (first 100) ==="
@@ -95,7 +102,6 @@ jobs:
           draft: false
           prerelease: true
           files: |
-            app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -104,9 +110,8 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ github.run_id }}
+          name: apk-debug-${{ github.run_id }}
           path: |
-            app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
