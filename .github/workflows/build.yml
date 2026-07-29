@@ -77,7 +77,7 @@ jobs:
           find app/build -name "*.apk" -type f 2>&1 | wc -l
 
       - name: Upload Debug APK (arm64)
-        if: success()
+        if: steps.build_step.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk-arm64
@@ -85,7 +85,7 @@ jobs:
           retention-days: 30
 
       - name: Upload Debug APK (universal)
-        if: success()
+        if: steps.build_step.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk-universal
@@ -93,7 +93,7 @@ jobs:
           retention-days: 30
 
       - name: Publish to GitHub Release
-        if: success()
+        if: steps.build_step.conclusion == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: debug-${{ github.sha }}
