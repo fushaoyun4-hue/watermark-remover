@@ -24,7 +24,7 @@ jobs:
           distribution: temurin
 
       - name: Cache Gradle packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
@@ -43,17 +43,16 @@ jobs:
         id: build_step
         run: ./gradlew clean assembleDebug --no-daemon 2>&1 | tee build.log
 
+      - name: Print build log tail
+        run: tail -50 build.log
+
       - name: Capture build error
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ci_artifacts
-          if [ -s build.log ]; then
-            cp build.log ci_artifacts/ci_error.txt
-          else
-            echo "build.log MISSING or EMPTY" > ci_artifacts/ci_error.txt
-          fi
+          cp build.log ci_artifacts/ci_error.txt || true
           echo "=== APK debug dir ===" >> ci_artifacts/ci_error.txt
           ls -laR app/build/outputs/apk/debug/ >> ci_artifacts/ci_error.txt 2>&1 || true
           echo "=== All APK files ===" >> ci_artifacts/ci_error.txt
@@ -61,26 +60,28 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/ci_artifacts 2>/dev/null || true
+          git add ci_artifacts/ci_error.txt 2>/dev/null || true
           git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
           git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
 
-      - name: List APK output
+      - name: Find all APK files
         run: |
-          echo "=== APK debug directory ==="
-          ls -laR app/build/outputs/apk/debug/ 2>&1 || echo "Directory not found"
-          echo "=== All APK files in project ==="
-          find app/build -name "*.apk" -type f 2>&1 || echo "No APK files found"
+          echo "=== All .apk files in app/build ==="
+          find app/build -name "*.apk" -type f 2>&1
           echo "=== APK count ==="
-          find app/build -name "*.apk" -type f 2>&1 | wc -l
+          find app/build -name "*.apk" -type f | wc -l
+
+      - name: List APK debug output
+        run: |
+          echo "=== app/build/outputs/apk/debug/ ==="
+          ls -laR app/build/outputs/apk/debug/ 2>&1 || echo "Directory NOT found"
 
       - name: Upload Debug APKs
         if: steps.build_step.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apks
+          name: debug-apks-${{ github.run_id }}
           path: app/build/outputs/apk/debug/
-          retention-days: 30
 
       - name: Publish to GitHub Release
         if: steps.build_step.conclusion == 'success'
@@ -88,7 +89,8 @@ jobs:
         with:
           tag_name: debug-${{ github.sha }}
           name: Debug APK (${{ github.sha }})
-          body: "Debug APK built from `${{ github.sha }}`"
+          body: |
+            Built from `${{ github.sha }}`
           draft: false
           prerelease: true
           files: |
