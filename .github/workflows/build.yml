@@ -72,21 +72,27 @@ jobs:
 
       - name: Diagnose build output
         run: |
+          echo "=== Build log last 30 lines ==="
+          tail -30 build.log
           echo "=== Full app/build directory tree ==="
-          find app/build -type f 2>&1 | head -50
+          find app/build -type f 2>&1 | head -100
           echo "=== app/build/outputs directory ==="
           ls -laR app/build/outputs/ 2>&1 || echo "Directory NOT found"
-          echo "=== All APK files ==="
-          find app/build -name "*.apk" -type f 2>&1
+          echo "=== Find ALL .apk in entire project ==="
+          find . -name "*.apk" -type f 2>&1
           echo "=== APK count ==="
-          find app/build -name "*.apk" -type f | wc -l
+          find . -name "*.apk" -type f | wc -l
 
       - name: Upload Debug APKs
-        if: steps.build_step.conclusion == 'success' && runner.run_attempt == 1
+        if: steps.build_step.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: debug-apks-${{ github.run_id }}
-          path: app/build/outputs/apk/debug/
+          path: |
+            app/build/outputs/apk/debug/
+            app/build/outputs/apk/release/
+            **/*.apk
+          if-no-files-found: warn
 
       - name: Upload Debug APKs
         if: steps.build_step.conclusion == 'success'
