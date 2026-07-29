@@ -4,6 +4,15 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
 
 permissions:
   contents: write
@@ -11,7 +20,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -24,7 +33,7 @@ jobs:
           distribution: temurin
 
       - name: Cache Gradle packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
@@ -39,26 +48,72 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build with Gradle
-        run: ./gradlew assembleRelease --no-daemon 2>&1 | tee build.log
+      - name: Build APK
+        id: build
+        run: |
+          BUILD_TYPE=${{ inputs.build_type || 'release' }}
+          echo "=== Building $BUILD_TYPE APK ==="
+          ./gradlew assemble${{ inputs.build_type || 'Release' }} --no-daemon --stacktrace 2>&1 | tee build.log
+          echo "=== Gradle exit code: $? ==="
 
-      - name: Capture build error
+      - name: Show build log tail
+        if: always()
+        run: |
+          echo "=== Last 50 lines of build.log ==="
+          tail -50 build.log
+
+      - name: List all APK files
+        run: |
+          echo "=== All .apk files found ==="
+          find . -name "*.apk" -type f 2>&1
+          echo "=== APK count: $(find . -name '*.apk' -type f | wc -l) ==="
+
+      - name: List outputs directory
+        run: |
+          echo "=== app/build/outputs contents ==="
+          ls -laR app/build/outputs/ 2>&1 || echo "Directory NOT found"
+
+      - name: Upload APK to GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_id }}
+          name: APK Build #${{ github.run_number }} (${{ github.sha }})
+          body: |
+            **Build:** #${{ github.run_number }}
+            **Commit:** `${{ github.sha }}`
+            **Branch:** `${{ github.ref_name }}`
+            **Trigger:** ${{ github.event_name }}
+          draft: false
+          prerelease: true
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload APK as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.run_id }}
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Capture build error details
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ci_artifacts
-          { [ -f build.log ] && tail -c 40000 build.log || echo "build.log MISSING"; } > ci_artifacts/ci_error.txt
+          { [ -f build.log ] && tail -c 40000 build.log || echo "build.log MISSING"; } > ci_artifacts/build_error.log 2>&1 || true
+          find . -name "*.apk" -type f >> ci_artifacts/build_error.log 2>&1 || true
+          ls -laR app/build/outputs/ >> ci_artifacts/build_error.log 2>&1 || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/ci_error.txt 2>/dev/null
+          git add ci_artifacts/build_error.log 2>/dev/null || true
           git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
           git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
-
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: my-release-apk
-          path: app/build/outputs/apk/release/*.apk
