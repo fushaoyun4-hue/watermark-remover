@@ -39,12 +39,18 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: List Gradle projects & APK tasks
+        run: |
+          echo "=== Available projects ==="
+          ./gradlew projects --no-daemon 2>&1 | head -20
+          echo "=== APK-related tasks ==="
+          ./gradlew tasks --group=build --no-daemon 2>&1 | grep -i apk || echo "No apk tasks found"
+
       - name: Build Debug APK
         id: build_step
-        run: ./gradlew clean assembleDebug --no-daemon 2>&1 | tee build.log
-
-      - name: Print build log tail
-        run: tail -50 build.log
+        run: |
+          ./gradlew clean assembleDebug --no-daemon --info 2>&1 | tee build.log | tail -100
+          echo "=== Exit code: $? ==="
 
       - name: Capture build error
         if: failure()
@@ -64,17 +70,23 @@ jobs:
           git commit -m "ci: capture build error [skip ci]" 2>&1 | tail -2 || true
           git push origin HEAD:ci-debug --force 2>&1 | tail -2 || true
 
-      - name: Find all APK files
+      - name: Diagnose build output
         run: |
-          echo "=== All .apk files in app/build ==="
+          echo "=== Full app/build directory tree ==="
+          find app/build -type f 2>&1 | head -50
+          echo "=== app/build/outputs directory ==="
+          ls -laR app/build/outputs/ 2>&1 || echo "Directory NOT found"
+          echo "=== All APK files ==="
           find app/build -name "*.apk" -type f 2>&1
           echo "=== APK count ==="
           find app/build -name "*.apk" -type f | wc -l
 
-      - name: List APK debug output
-        run: |
-          echo "=== app/build/outputs/apk/debug/ ==="
-          ls -laR app/build/outputs/apk/debug/ 2>&1 || echo "Directory NOT found"
+      - name: Upload Debug APKs
+        if: steps.build_step.conclusion == 'success' && runner.run_attempt == 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apks-${{ github.run_id }}
+          path: app/build/outputs/apk/debug/
 
       - name: Upload Debug APKs
         if: steps.build_step.conclusion == 'success'
