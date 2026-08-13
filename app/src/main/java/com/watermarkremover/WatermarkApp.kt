@@ -1,15 +1,9 @@
 package com.watermarkremover
 
 import android.app.Application
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
 class WatermarkApp : Application() {
-
-    override fun onCreate() {
-        super.onCreate()
-        // FFmpegKit 初始化
-        FFmpegKitConfig.init()
-    }
+    // FFmpegKit 6.0+ 自动初始化，无需手动调用
 }
