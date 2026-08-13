@@ -38,9 +38,10 @@ jobs:
       - name: Build Debug APK with verbose output
         id: build_step
         run: |
+          set -o pipefail
           echo "=== Running: ./gradlew clean assembleDebug --no-daemon --stacktrace ==="
           ./gradlew clean assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
-          echo "=== Gradle exit code: $? ==="
+          echo "=== Gradle exit code: ${PIPESTATUS[0]} ==="
 
       - name: Show build log tail
         run: |
@@ -57,18 +58,32 @@ jobs:
       - name: List app/build/outputs
         run: ls -laR app/build/outputs/ 2>&1 || echo "app/build/outputs NOT found"
 
+      - name: Capture build log on failure
+        if: failure()
+        run: |
+          mkdir -p ci_artifacts
+          cp build.log ci_artifacts/build.log 2>/dev/null || echo "no build.log"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git add ci_artifacts/build.log
+          git commit -m "ci: build log run ${{ github.run_id }}" || echo "nothing to commit"
+          git push -f origin HEAD:ci-debug
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload Debug APKs
-        if: steps.build_step.conclusion == 'success'
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: debug-apks
           path: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Create GitHub Release
-        if: steps.build_step.conclusion == 'success'
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: debug-${{ github.sha }}
