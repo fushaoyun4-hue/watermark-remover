@@ -62,11 +62,11 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci_artifacts
-          cp build.log ci_artifacts/build.log 2>/dev/null || echo "no build.log"
+          cp build.log ci_artifacts/build_log.txt 2>/dev/null || echo "no build.log"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/build.log
+          git add ci_artifacts/build_log.txt
           git commit -m "ci: build log run ${{ github.run_id }}" || echo "nothing to commit"
           git push -f origin HEAD:ci-debug
         env:
