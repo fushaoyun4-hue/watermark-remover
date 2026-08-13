@@ -104,6 +104,10 @@ class EditorViewModel @Inject constructor(
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
+    fun setMediaAspectRatio(ratio: Float) {
+        mediaAspectRatio = ratio
+    }
+
     /** 媒体原始宽高比（宽/高），用于画面自适应 */
     var mediaAspectRatio by mutableStateOf<Float?>(null)
         private set
@@ -287,16 +291,16 @@ fun EditorScreen(
                     videoHeight = bitmap?.height ?: 1080
                 }
                 if (videoWidth > 0 && videoHeight > 0) {
-                    viewModel.mediaAspectRatio = videoWidth.toFloat() / videoHeight.toFloat()
+                    viewModel.setMediaAspectRatio(videoWidth.toFloat() / videoHeight.toFloat())
                 }
             } catch (e: Exception) {
                 // fallback：16:9
-                viewModel.mediaAspectRatio = 16f / 9f
+                viewModel.setMediaAspectRatio(16f / 9f)
             }
         } else {
             // 图片：从 AsyncImage 加载时无法直接获取尺寸，用 PlaceHolder 方案
             // 先用 4:3 作为 fallback，图片加载后更新
-            viewModel.mediaAspectRatio = 4f / 3f
+            viewModel.setMediaAspectRatio(4f / 3f)
         }
     }
 
@@ -313,7 +317,7 @@ fun EditorScreen(
                         imageWidth = opts.outWidth
                         imageHeight = opts.outHeight
                         if (imageWidth > 0 && imageHeight > 0) {
-                            viewModel.mediaAspectRatio = imageWidth.toFloat() / imageHeight.toFloat()
+                            viewModel.setMediaAspectRatio(imageWidth.toFloat() / imageHeight.toFloat())
                         }
                     }
                 } catch (_: Exception) { /* ignore */ }
