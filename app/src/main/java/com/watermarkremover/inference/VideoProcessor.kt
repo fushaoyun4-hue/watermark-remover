@@ -19,7 +19,6 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import org.opencv.photo.Photo
 import java.io.File
-import java.io.File
 import java.io.FileOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
