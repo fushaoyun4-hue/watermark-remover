@@ -482,7 +482,7 @@ fun EditorScreen(
                                 },
                                 onDragEnd = {
                                     // 不自动确认，等用户点勾选
-                                    viewModel.confirmPendingMask()
+                                    viewModel.acceptPendingMask()
                                 }
                             )
                         }
@@ -565,22 +565,6 @@ fun EditorScreen(
                                 )
                             )
 
-                            // 右上角：勾（绿色）叉（红色）
-                            val btnCenterX = l + w
-                            val btnCenterY = t
-
-                            // 绿色勾按钮
-                            drawCircle(
-                                color = Color(0xFF00C853),
-                                radius = btnPx,
-                                center = Offset(btnCenterX - btnPx * 2.2f, btnCenterY + btnPx * 1.2f)
-                            )
-                            // 红色叉按钮
-                            drawCircle(
-                                color = Color(0xFFFF5252),
-                                radius = btnPx,
-                                center = Offset(btnCenterX - btnPx * 0.4f, btnCenterY + btnPx * 1.2f)
-                            )
                         }
                     }
 
@@ -595,39 +579,39 @@ fun EditorScreen(
                             val t = minOf(p.top,   p.bottom) * boxH
                             val w = kotlin.math.abs(p.right - p.left) * boxW
 
-                            // 绿色勾选按钮（框右上角）
+                            // 绿色勾选按钮（框右上角外侧）
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
-                                    .offset(x = (l + w - 42).dp, y = (t + 2).dp)
-                                    .clip(CircleShape)
+                                    .size(32.dp)
+                                    .offset(x = (l + w + 4).dp, y = (t - 16).dp)
+                                    .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFF00C853))
                                     .clickable { viewModel.acceptPendingMask() },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    Icons.Filled.Check,
-                                    contentDescription = "确认",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
+                                Text(
+                                    text = "✓",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            // 红色叉号按钮（勾按钮右边）
+                            // 红色叉号按钮（勾按钮下方）
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
-                                    .offset(x = (l + w - 6).dp, y = (t + 2).dp)
-                                    .clip(CircleShape)
+                                    .size(32.dp)
+                                    .offset(x = (l + w + 4).dp, y = (t + 20).dp)
+                                    .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFFFF5252))
                                     .clickable { viewModel.rejectPendingMask() },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    Icons.Filled.Close,
-                                    contentDescription = "取消",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
+                                Text(
+                                    text = "✕",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
