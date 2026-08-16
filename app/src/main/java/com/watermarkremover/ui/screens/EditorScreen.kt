@@ -2,6 +2,7 @@ package com.watermarkremover.ui.screens
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
