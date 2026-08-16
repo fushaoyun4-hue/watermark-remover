@@ -119,8 +119,11 @@ dependencies {
     kapt("com.google.dagger:hilt-compiler:2.50")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
-    // OpenCV Android SDK - 使用本地源码和 jniLibs（已复制到项目）
-    // implementation("org.opencv:opencv:4.9.0")  // Maven 版本不包含 native 库
+    // OpenCV 4.9.0 - 官方 Maven Central AAR（org.opencv:opencv:4.9.0）
+    // 该 AAR 已内含全部 Java 类 + 4 个 ABI 的原生库(jni/arm64-v8a/libopencv_java4.so 等)，
+    // 无需再本地复制 Java 源码或 jniLibs（之前复制 SDK 源码会导致 compileReleaseJavaWithJavac 失败：
+    // android 包引用了不存在的 org.opencv.R；不复制又导致 Kotlin 找不到 OpenCV 类）。
+    implementation("org.opencv:opencv:4.9.0")
 
     // FFmpegKit (Full GPL - includes FFmpeg)
     implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2")
