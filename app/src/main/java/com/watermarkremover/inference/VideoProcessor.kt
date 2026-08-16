@@ -86,12 +86,18 @@ class VideoProcessor @Inject constructor(
         val height = bitmap.height
 
         // 将 Bitmap 转换为 OpenCV Mat
+        // Utils.bitmapToMat 对 ARGB_8888 产生 CV_8UC4（4通道），inpaint 只接受 8-bit 3通道 BGR
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
 
+        // 4通道 RGBA → 3通道 BGR（inpaint 的必需格式）
+        val srcBgr = Mat()
+        Imgproc.cvtColor(src, srcBgr, Imgproc.COLOR_RGBA2BGR)
+        src.release()
+
         // 转为灰度图（蒙版用）
         val graySrc = Mat()
-        Imgproc.cvtColor(src, graySrc, Imgproc.COLOR_BGR2GRAY)
+        Imgproc.cvtColor(srcBgr, graySrc, Imgproc.COLOR_BGR2GRAY)
 
         // 创建蒙版
         val mask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
@@ -126,16 +132,21 @@ class VideoProcessor @Inject constructor(
         val dst = Mat()
         val radius = if (useNavierStokes) INPAINT_RADIUS_NS else INPAINT_RADIUS_TELEA
         val flag = if (useNavierStokes) Photo.INPAINT_NS else Photo.INPAINT_TELEA
-        Photo.inpaint(src, mask, dst, radius, flag)
+        Photo.inpaint(srcBgr, graySrc, dst, radius, flag)
+
+        // BGR(3通道) → RGBA(4通道) 才能写入 ARGB_8888 Bitmap
+        val dstRgba = Mat()
+        Imgproc.cvtColor(dst, dstRgba, Imgproc.COLOR_BGR2RGBA)
+        dst.release()
 
         // 转换回 Bitmap
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(dst, result)
+        Utils.matToBitmap(dstRgba, result)
+        dstRgba.release()
 
         // 严格释放内存
-        src.release()
+        srcBgr.release()
         graySrc.release()
-        dst.release()
         mask.release()
 
         result
@@ -194,8 +205,9 @@ class VideoProcessor @Inject constructor(
             var processed = 0
             for (frameFile in frameFiles) {
                 // BitmapFactory.Options 降低内存占用
+                // 必须用 ARGB_8888（4通道），否则 inpaint 报 Unsupported format
                 val options = BitmapFactory.Options().apply {
-                    inPreferredConfig = Bitmap.Config.RGB_565  // 16bit，省 50% 内存
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
                 }
                 val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath, options)
 
