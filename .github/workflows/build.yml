@@ -32,8 +32,17 @@ jobs:
       - name: Download and setup OpenCV Android SDK
         run: |
           echo "=== Downloading OpenCV Android SDK v4.9.0 ==="
-          curl -L -o opencv-sdk.zip "https://downloads.sourceforge.net/project/opencvlibrary/4.9.0/opencv-4.9.0-android-sdk.zip"
-          unzip -q opencv-sdk.zip
+          # 使用 GitHub mirror 或直接下载
+          OPENCV_URL="https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-android-sdk.zip"
+          echo "Downloading from: $OPENCV_URL"
+          curl -L --max-time 300 -o opencv-sdk.zip "$OPENCV_URL" || {
+            echo "GitHub download failed, trying SourceForge..."
+            curl -L --max-time 300 -o opencv-sdk.zip "https://sourceforge.net/projects/opencvlibrary/files/4.9.0/opencv-4.9.0-android-sdk.zip/download"
+          }
+          
+          echo "=== Extracting SDK ==="
+          unzip -q opencv-sdk.zip || { echo "Unzip failed!"; ls -la; exit 1; }
+          ls -la OpenCV-android-sdk/sdk/native/libs/ 2>/dev/null || ls -la
           
           echo "=== Setting up OpenCV in project ==="
           # Copy native libraries to jniLibs
@@ -53,6 +62,7 @@ jobs:
           
           echo "=== OpenCV setup complete ==="
           ls -la app/src/main/jniLibs/arm64-v8a/
+          ls -la app/src/main/java/org/opencv/ | head -10
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
