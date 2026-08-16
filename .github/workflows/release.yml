@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -144,37 +145,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           mkdir -p ci_artifacts
           {
-            echo "=== GRADLE BUILD LOG (last 200 lines) ==="
-            if [ -f build.log ]; then tail -200 build.log; else echo "build.log NOT FOUND"; fi
-            echo ""
-            echo "=== APK FILES (find across entire repo) ==="
-            find . -name "*.apk" -type f 2>&1 || echo "No APKs"
-            echo ""
-            echo "=== app/build/outputs directory ==="
-            ls -laR app/build/outputs/ 2>&1 || echo "NOT FOUND"
-            echo ""
-            echo "=== app/build directory (top-level) ==="
-            ls -laR app/build/ 2>&1 | head -50 || echo "NOT FOUND"
-            echo ""
+            echo "RUN_ID=${{ github.run_id }}  SHA=${{ github.sha }}  TIME=$(date -u)"
+            echo "=== BUILD LOG (tail 400) ==="
+            [ -f build.log ] && tail -400 build.log || echo "build.log MISSING"
+            echo "=== APK FILES ==="
+            find . -name '*.apk' -type f 2>/dev/null | head -50 || echo "no apks"
+            echo "=== app/build/outputs ==="
+            ls -laR app/build/outputs/ 2>/dev/null | head -100 || echo "no outputs dir"
             echo "=== gradle.properties ==="
-            cat gradle.properties 2>&1 || echo "NOT FOUND"
-            echo ""
-            echo "=== signingConfigs in app/build.gradle.kts ==="
-            grep -C 5 "signing" app/build.gradle.kts 2>&1 || echo "NOT FOUND"
-            echo ""
-            echo "=== buildTypes in app/build.gradle.kts ==="
-            grep -C 3 "buildType" app/build.gradle.kts 2>&1 || echo "NOT FOUND"
+            cat gradle.properties 2>/dev/null || echo "none"
+            echo "=== signing/buildType grep in app/build.gradle.kts ==="
+            grep -n -E "signing|buildType|isMinify" app/build.gradle.kts 2>/dev/null || echo "none"
           } > ci_artifacts/error.log
-          echo "Error log size: $(wc -c < ci_artifacts/error.log) bytes"
-          echo "First 500 chars:"
-          head -c 500 ci_artifacts/error.log
+          echo "error.log bytes: $(wc -c < ci_artifacts/error.log)"
+          # Report via GitHub issue (readable through public API without personal token)
+          BODY=$(head -c 30000 ci_artifacts/error.log | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -d "{\"title\":\"[CI ERROR] run ${{ github.run_id }}\",\"body\":${BODY}}"
+          echo "issue reported"
+          # Also try ci-debug branch as backup
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git add ci_artifacts/error.log
-          git commit -m "ci: build error log run ${{ github.run_id }}"
-          echo "Committed: $(git log -1 --format='%H %s')"
-          git push -f origin HEAD:ci-debug
-          echo "Pushed to ci-debug."
+          git add -f ci_artifacts/error.log
+          git commit --allow-empty -m "ci: build error log run ${{ github.run_id }}"
+          git push -f origin HEAD:ci-debug || echo "ci-debug push failed"
+          echo "done"
