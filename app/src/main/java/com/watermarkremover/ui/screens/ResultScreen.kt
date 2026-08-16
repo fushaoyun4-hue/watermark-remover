@@ -1,17 +1,22 @@
 package com.watermarkremover.ui.screens
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +42,37 @@ import java.io.FileOutputStream
 import com.watermarkremover.ui.theme.WatermarkRemoverTheme
 
 /**
- * 结果页：处理完成，显示对比，提供保存按钮
+ * 执行保存（提取为顶层函数供权限回调使用）
+ */
+private fun performSave(
+    context: Context,
+    processedUri: String,
+    mediaType: String,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onResult: (String?) -> Unit
+) {
+    scope.launch {
+        try {
+            val saved = withContext(Dispatchers.IO) {
+                val sourceUri = Uri.parse(processedUri)
+                val fileName = "watermark_removed_${System.currentTimeMillis()}"
+
+                if (mediaType == "video") {
+                    saveVideoToGallery(context, sourceUri, fileName)
+                } else {
+                    saveImageToGallery(context, sourceUri, fileName)
+                }
+            }
+            onResult(saved)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            onResult(null)
+        }
+    }
+}
+
+/**
+ * 结果页：处理完成，提供保存按钮（不显示对比）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,38 +87,67 @@ fun ResultScreen(
     var isSaving by remember { mutableStateOf(false) }
     var savedPath by remember { mutableStateOf<String?>(null) }
 
-    fun saveToGallery() {
-        if (isSaving) return
-        isSaving = true
-
-        scope.launch {
-            try {
-                val saved = withContext(Dispatchers.IO) {
-                    val sourceUri = Uri.parse(processedUri)
-                    val fileName = "watermark_removed_${System.currentTimeMillis()}"
-
-                    if (mediaType == "video") {
-                        // 保存视频
-                        saveVideoToGallery(context, sourceUri, fileName)
-                    } else {
-                        // 保存图片
-                        saveImageToGallery(context, sourceUri, fileName)
-                    }
-                }
-
-                if (saved != null) {
-                    savedPath = saved
+    // Android 9- 需要运行时权限
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            // 权限授予后执行保存
+            performSave(context, processedUri, mediaType, scope) { path ->
+                isSaving = false
+                savedPath = path
+                if (path != null) {
                     Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
-            } finally {
+            }
+        } else {
+            isSaving = false
+            Toast.makeText(context, "需要存储权限才能保存", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun saveToGallery() {
+        if (isSaving || savedPath != null) return
+
+        // Android 10+ 不需要权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            isSaving = true
+            performSave(context, processedUri, mediaType, scope) { path ->
                 isSaving = false
+                savedPath = path
+                if (path != null) {
+                    Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            // Android 9- 检查权限
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                isSaving = true
+                performSave(context, processedUri, mediaType, scope) { path ->
+                    isSaving = false
+                    savedPath = path
+                    if (path != null) {
+                        Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                // 请求权限
+                permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
         }
     }
+
+
 
     WatermarkRemoverTheme {
         Scaffold(
@@ -90,55 +155,6 @@ fun ResultScreen(
                 TopAppBar(
                     title = { Text("处理完成") }
                 )
-            },
-            bottomBar = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Button(
-                        onClick = { saveToGallery() },
-                        enabled = !isSaving,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        if (isSaving) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = Color.White
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text("保存中...")
-                        } else {
-                            Icon(Icons.Filled.SaveAlt, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("保存到相册", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    savedPath?.let { path ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "✓ 已保存: $path",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    TextButton(
-                        onClick = onBack,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("继续处理其他文件")
-                    }
-                }
             }
         ) { padding ->
             Column(
@@ -146,91 +162,77 @@ fun ResultScreen(
                     .fillMaxSize()
                     .padding(padding)
                     .background(MaterialTheme.colorScheme.background)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                // 对比视图
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // 原图
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black)
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(Uri.parse(originalUri))
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "原图",
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                contentScale = ContentScale.Fit
-                            )
-                            Text(
-                                text = "处理前",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(4.dp)
-                            )
-                        }
-                    }
+                // 成功图标
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(80.dp)
+                )
 
-                    // 处理后
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black)
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(Uri.parse(processedUri))
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "处理后",
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                contentScale = ContentScale.Fit
-                            )
-                            Text(
-                                text = "处理后 ✓",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(4.dp)
-                            )
-                        }
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Text(
+                    text = "水印去除完成",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (savedPath != null) {
+                    Text(
+                        text = "✓ 已保存到相册",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center
+                    )
+                } else {
+                    Text(
+                        text = "点击下方按钮保存到手机相册",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // 保存按钮
+                Button(
+                    onClick = { saveToGallery() },
+                    enabled = !isSaving && savedPath == null,
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .height(56.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("保存中...")
+                    } else {
+                        Icon(Icons.Filled.SaveAlt, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("保存到相册", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
-                // 完成提示
-                if (savedPath == null) {
-                    Text(
-                        text = "点击下方按钮保存到相册",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 继续处理按钮
+                TextButton(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(0.8f)
+                ) {
+                    Text("继续处理其他文件")
                 }
             }
         }

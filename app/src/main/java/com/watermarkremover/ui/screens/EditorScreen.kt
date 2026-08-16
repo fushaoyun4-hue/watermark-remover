@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.navigationBarsPadding
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.watermarkremover.inference.VideoProcessor
@@ -114,6 +116,27 @@ class EditorViewModel @Inject constructor(
     var mediaAspectRatio by mutableStateOf<Float?>(null)
         private set
 
+    /** Canvas 尺寸（像素），由 UI 层设置 */
+    var canvasSize by mutableStateOf<androidx.compose.ui.geometry.Size?>(null)
+        private set
+
+    /** 视频在 Canvas 中的实际显示区域（像素坐标，相对于 Canvas 左上角） */
+    var videoDisplayRect by mutableStateOf<Rect?>(null)
+        private set
+
+    /** 视频原始像素尺寸（宽x高） */
+    var videoPixelSize by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+
+    fun setVideoDisplayRectAndCanvasSize(canvasW: Float, canvasH: Float, displayRect: Rect) {
+        canvasSize = androidx.compose.ui.geometry.Size(canvasW, canvasH)
+        videoDisplayRect = displayRect
+    }
+
+    fun setVideoPixelSize(width: Int, height: Int) {
+        videoPixelSize = width to height
+    }
+
     private var nextId = 0
 
     /** 松手时将临时框转为待确认状态（不自动加入 masks） */
@@ -178,7 +201,34 @@ class EditorViewModel @Inject constructor(
         progress = 0
         progressPhase = ""
 
-        val androidRects = masks.map { it.toRectF() }
+        // 将 Canvas 坐标系(0~1) 的蒙版转换为视频像素坐标系(0~1)
+        val displayRect = videoDisplayRect
+        val pixelSize = videoPixelSize
+        val cs = canvasSize
+        val androidRects = masks.map { mask ->
+            val raw = mask.toRectF()
+            if (displayRect != null && pixelSize != null && cs != null && mediaType == "video") {
+                // Canvas 像素坐标
+                val canvasL = raw.left * cs.width
+                val canvasT = raw.top * cs.height
+                val canvasR = raw.right * cs.width
+                val canvasB = raw.bottom * cs.height
+                // 视频显示区像素坐标
+                val vidL = (canvasL - displayRect.left).coerceIn(0f, displayRect.width)
+                val vidT = (canvasT - displayRect.top).coerceIn(0f, displayRect.height)
+                val vidR = (canvasR - displayRect.left).coerceIn(0f, displayRect.width)
+                val vidB = (canvasB - displayRect.top).coerceIn(0f, displayRect.height)
+                // 归一化到视频尺寸
+                RectF(
+                    vidL / displayRect.width,
+                    vidT / displayRect.height,
+                    vidR / displayRect.width,
+                    vidB / displayRect.height
+                )
+            } else {
+                raw
+            }
+        }
 
         viewModelScope.launch {
             try {
@@ -369,7 +419,8 @@ fun EditorScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp)
+                        .padding(horizontal = 16.dp)
+                        .navigationBarsPadding()  // 避免被系统导航栏遮挡
                 ) {
                     viewModel.errorMessage?.let { msg ->
                         Text(
@@ -450,7 +501,29 @@ fun EditorScreen(
                         )
                         .padding(8.dp)
                         .onSizeChanged { size ->
-                            canvasSize = Size(size.width.toFloat(), size.height.toFloat())
+                            val canvasW = size.width.toFloat()
+                            val canvasH = size.height.toFloat()
+                            canvasSize = Size(canvasW, canvasH)
+                            // 计算视频在 Canvas 中的实际显示区域（考虑 letterbox / pillarbox）
+                            val ratio = viewModel.mediaAspectRatio ?: (16f / 9f)
+                            val boxRatio = canvasW / canvasH
+                            val (vidW, vidH) = if (boxRatio > ratio) {
+                                // 左右有黑边（视频比 Canvas 更瘦长）
+                                val h = canvasH
+                                val w = h * ratio
+                                w.toFloat() to h.toFloat()
+                            } else {
+                                // 上下有黑边（视频比 Canvas 更扁宽）
+                                val w = canvasW
+                                val h = w / ratio
+                                w.toFloat() to h.toFloat()
+                            }
+                            val offsetX = (canvasW - vidW) / 2
+                            val offsetY = (canvasH - vidH) / 2
+                            viewModel.setVideoDisplayRectAndCanvasSize(
+                                canvasW, canvasH,
+                                Rect(offsetX, offsetY, offsetX + vidW, offsetY + vidH)
+                            )
                         }
                         .pointerInput(Unit) {
                             detectDragGestures(
@@ -572,6 +645,19 @@ fun EditorScreen(
                                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
                                 )
                             )
+
+                            // ── 四角拖拽手柄（视觉提示）──
+                            val handleR = 10.dp.toPx()
+                            val handleC = Color(0xFF2196F3)
+                            listOf(
+                                Offset(l, t),
+                                Offset(l + w, t),
+                                Offset(l, t + h),
+                                Offset(l + w, t + h)
+                            ).forEach { pos ->
+                                drawCircle(color = handleC, radius = handleR, center = pos)
+                                drawCircle(color = Color.White, radius = handleR * 0.5f, center = pos)
+                            }
 
                         }
                     }
