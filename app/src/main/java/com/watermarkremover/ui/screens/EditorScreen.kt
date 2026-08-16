@@ -33,8 +33,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -433,16 +435,17 @@ fun EditorScreen(
                     .background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                // 根据实际比例显示，填满屏幕宽度，高度自适应
+                // 限制媒体区域高度，留出操作区空间
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .fillMaxHeight(0.75f)  // 最多占 75% 高度，留空间给底部按钮
                         .then(
-                            // 如果已有实际比例，用实际比例；否则填满可用高度
-                            if (viewModel.mediaAspectRatio != null) {
+                            // 如果已有实际比例，用实际比例；否则填满
+                            if (viewModel.mediaAspectRatio != null && viewModel.mediaAspectRatio!! > 0) {
                                 Modifier.aspectRatio(viewModel.mediaAspectRatio!!)
                             } else {
-                                Modifier.fillMaxHeight(0.7f)
+                                Modifier
                             }
                         )
                         .padding(8.dp)
@@ -452,6 +455,11 @@ fun EditorScreen(
                         .pointerInput(Unit) {
                             detectDragGestures(
                                 onDragStart = { startPos ->
+                                    // 如果有待确认的框，先处理它
+                                    if (viewModel.pendingMask != null) {
+                                        return@detectDragGestures  // 忽略新的拖拽
+                                    }
+                                    
                                     val nx0 = startPos.x / canvasSize.width
                                     val ny0 = startPos.y / canvasSize.height
                                     val hitMask = viewModel.masks.find { m ->
@@ -466,7 +474,6 @@ fun EditorScreen(
                                     } else {
                                         // 空白处开始拖拽新建框
                                         dragStart = startPos
-                                        viewModel.cancelPendingMask()
                                     }
                                 },
                                 onDrag = { change, _ ->
@@ -574,18 +581,19 @@ fun EditorScreen(
                         BoxWithConstraints(
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            val boxW = constraints.maxWidth.toFloat()
-                            val boxH = constraints.maxHeight.toFloat()
-                            val l = minOf(p.left,  p.right) * boxW
-                            val t = minOf(p.top,   p.bottom) * boxH
-                            val w = kotlin.math.abs(p.right - p.left) * boxW
+                            val density = LocalDensity.current
+                            val boxW = constraints.maxWidth
+                            val boxH = constraints.maxHeight
+                            val l = (minOf(p.left, p.right) * boxW).toInt()
+                            val t = (minOf(p.top, p.bottom) * boxH).toInt()
+                            val w = (kotlin.math.abs(p.right - p.left) * boxW).toInt()
 
                             // 绿色勾选按钮（框内右上角）
                             Box(
                                 modifier = Modifier
-                                    .size(28.dp)
-                                    .offset(x = (l + w - 32).dp, y = (t + 4).dp)
-                                    .clip(RoundedCornerShape(4.dp))
+                                    .size(32.dp)
+                                    .offset { IntOffset(l + w - 36, t + 4) }
+                                    .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFF00C853))
                                     .clickable { viewModel.acceptPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -593,7 +601,7 @@ fun EditorScreen(
                                 Text(
                                     text = "✓",
                                     color = Color.White,
-                                    fontSize = 16.sp,
+                                    fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -601,9 +609,9 @@ fun EditorScreen(
                             // 红色叉号按钮（框内右上角，勾按钮左边）
                             Box(
                                 modifier = Modifier
-                                    .size(28.dp)
-                                    .offset(x = (l + w - 64).dp, y = (t + 4).dp)
-                                    .clip(RoundedCornerShape(4.dp))
+                                    .size(32.dp)
+                                    .offset { IntOffset(l + w - 72, t + 4) }
+                                    .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFFFF5252))
                                     .clickable { viewModel.rejectPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -611,7 +619,7 @@ fun EditorScreen(
                                 Text(
                                     text = "✕",
                                     color = Color.White,
-                                    fontSize = 16.sp,
+                                    fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
