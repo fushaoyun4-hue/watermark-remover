@@ -149,8 +149,16 @@ jobs:
           mkdir -p ci_artifacts
           {
             echo "RUN_ID=${{ github.run_id }}  SHA=${{ github.sha }}  TIME=$(date -u)"
-            echo "=== BUILD LOG (tail 400) ==="
-            [ -f build.log ] && tail -400 build.log || echo "build.log MISSING"
+            echo "=== BUILD LOG (filtered: noise warnings removed) ==="
+            if [ -f build.log ]; then
+              grep -v -E "needs opt-in|is never used|deprecated in Java|This declaration needs opt-in|w: file://|is deprecated" build.log > /tmp/filtered.log
+              echo "--- lines matching error/failure patterns ---"
+              grep -n -E "error:|FAILURE|What went wrong|Exception in|Task :app:.*FAILED|BUILD FAILED|> Task :app:[A-Za-z]*FAILED" /tmp/filtered.log | tail -40
+              echo "--- last 250 lines of filtered log ---"
+              tail -250 /tmp/filtered.log
+            else
+              echo "build.log MISSING"
+            fi
             echo "=== APK FILES ==="
             find . -name '*.apk' -type f 2>/dev/null | head -50 || echo "no apks"
             echo "=== app/build/outputs ==="
