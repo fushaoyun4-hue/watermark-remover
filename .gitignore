@@ -34,5 +34,6 @@ release-keystore.jks.old
 
 # OpenCV Android SDK (downloaded separately, too large for git)
 opencv-android-sdk/
+OpenCV-android-sdk/
 app/src/main/jniLibs/
 app/src/main/java/org/opencv/

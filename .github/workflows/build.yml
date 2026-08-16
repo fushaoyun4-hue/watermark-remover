@@ -32,34 +32,33 @@ jobs:
       - name: Download and setup OpenCV Android SDK
         run: |
           echo "=== Downloading OpenCV Android SDK v4.9.0 ==="
-          # 使用 GitHub mirror 或直接下载
+          # GitHub mirror (faster)
           OPENCV_URL="https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-android-sdk.zip"
           echo "Downloading from: $OPENCV_URL"
           curl -L --max-time 300 -o opencv-sdk.zip "$OPENCV_URL" || {
-            echo "GitHub download failed, trying SourceForge..."
-            curl -L --max-time 300 -o opencv-sdk.zip "https://sourceforge.net/projects/opencvlibrary/files/4.9.0/opencv-4.9.0-android-sdk.zip/download"
+            echo "GitHub failed, trying SourceForge..."
+            SF_URL="https://sourceforge.net/projects/opencvlibrary/files/4.9.0/opencv-4.9.0-android-sdk.zip/download"
+            curl -L --max-time 300 -o opencv-sdk.zip "$SF_URL"
           }
-          
+
           echo "=== Extracting SDK ==="
           unzip -q opencv-sdk.zip || { echo "Unzip failed!"; ls -la; exit 1; }
           ls -la OpenCV-android-sdk/sdk/native/libs/ 2>/dev/null || ls -la
-          
+
           echo "=== Setting up OpenCV in project ==="
-          # Copy native libraries to jniLibs
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/jniLibs/armeabi-v7a
           mkdir -p app/src/main/jniLibs/x86
           mkdir -p app/src/main/jniLibs/x86_64
-          
+
           cp OpenCV-android-sdk/sdk/native/libs/arm64-v8a/*.so app/src/main/jniLibs/arm64-v8a/
           cp OpenCV-android-sdk/sdk/native/libs/armeabi-v7a/*.so app/src/main/jniLibs/armeabi-v7a/
           cp OpenCV-android-sdk/sdk/native/libs/x86/*.so app/src/main/jniLibs/x86/
           cp OpenCV-android-sdk/sdk/native/libs/x86_64/*.so app/src/main/jniLibs/x86_64/
-          
-          # Copy Java source code
+
           mkdir -p app/src/main/java/org/opencv
           cp -r OpenCV-android-sdk/sdk/java/src/org/opencv/* app/src/main/java/org/opencv/
-          
+
           echo "=== OpenCV setup complete ==="
           ls -la app/src/main/jniLibs/arm64-v8a/
           ls -la app/src/main/java/org/opencv/ | head -10

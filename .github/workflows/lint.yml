@@ -1,22 +1,12 @@
----
-# ============================================================
-# 工作流名称：YAML 语法检查
-# 作用：在每次 push 到 master 分支、以及每个 PR 提交时，
-#       自动用 yamllint 检查 .github/workflows/ 下所有 YAML 文件语法。
-#       若检查失败，该步骤以非零状态退出，Actions 页面对应任务标红。
-# ============================================================
+# YAML syntax check for GitHub Actions workflows
 name: YAML Lint
 
-# 触发条件：
-#   1) 每次 push 到 master 分支时运行
-#   2) 每次向 master 提交的 PR（新建 / 更新提交 / 重新打开）时运行
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
 
-# 仅授予读取仓库内容的权限（checkout 步骤需要）
 permissions:
   contents: read
 
@@ -26,15 +16,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤1：拉取仓库代码，后续 yamllint 需要读取工作流文件
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 步骤2：使用社区主流的 yamllint Action 检查 YAML 语法
-      #   file_or_dir  —— 限定只检查 .github/workflows/ 目录下的 YAML 文件
-      #   config_file  —— 使用仓库根目录的 .yamllint.yml 作为规则配置
-      #   format       —— 输出 github 格式，可在 PR 上直接显示行内错误标注
-      # 若发现语法错误，该步骤以非零状态退出，任务标红失败（阻断合并/后续流程）
       - name: Run yamllint
         uses: ibiqlik/action-yamllint@v3
         with:
