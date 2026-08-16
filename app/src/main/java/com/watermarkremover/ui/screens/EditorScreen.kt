@@ -576,24 +576,23 @@ fun EditorScreen(
                         }
                     }
 
-                    // ---- 待确认框右上角的勾叉按钮（Overlay 绝对定位） ----
+                    // ---- 待确认框顶部左右角的勾叉按钮 ----
                     viewModel.pendingMask?.let { p ->
                         BoxWithConstraints(
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            val density = LocalDensity.current
                             val boxW = constraints.maxWidth
                             val boxH = constraints.maxHeight
                             val l = (minOf(p.left, p.right) * boxW).toInt()
                             val t = (minOf(p.top, p.bottom) * boxH).toInt()
                             val w = (kotlin.math.abs(p.right - p.left) * boxW).toInt()
 
-                            // 绿色勾选按钮（框内右上角）
+                            // 绿色勾选按钮（框外顶部右侧）
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .offset { IntOffset(l + w - 36, t + 4) }
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .size(36.dp)
+                                    .offset { IntOffset(l + w - 36, t - 40) }  // 框外顶部右侧
+                                    .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFF00C853))
                                     .clickable { viewModel.acceptPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -601,17 +600,17 @@ fun EditorScreen(
                                 Text(
                                     text = "✓",
                                     color = Color.White,
-                                    fontSize = 18.sp,
+                                    fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            // 红色叉号按钮（框内右上角，勾按钮左边）
+                            // 红色叉号按钮（框外顶部左侧）
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .offset { IntOffset(l + w - 72, t + 4) }
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .size(36.dp)
+                                    .offset { IntOffset(l, t - 40) }  // 框外顶部左侧
+                                    .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFFFF5252))
                                     .clickable { viewModel.rejectPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -619,7 +618,7 @@ fun EditorScreen(
                                 Text(
                                     text = "✕",
                                     color = Color.White,
-                                    fontSize = 18.sp,
+                                    fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
