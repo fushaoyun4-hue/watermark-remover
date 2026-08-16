@@ -481,8 +481,9 @@ fun EditorScreen(
                                     ))
                                 },
                                 onDragEnd = {
-                                    // 不自动确认，等用户点勾选
-                                    viewModel.acceptPendingMask()
+                                    // 规范化坐标（确保 left<right, top<bottom）
+                                    viewModel.confirmPendingMask()
+                                    // 不自动加入 masks，保留 pendingMask 等用户点 ✓/✕
                                 }
                             )
                         }
@@ -579,12 +580,12 @@ fun EditorScreen(
                             val t = minOf(p.top,   p.bottom) * boxH
                             val w = kotlin.math.abs(p.right - p.left) * boxW
 
-                            // 绿色勾选按钮（框右上角外侧）
+                            // 绿色勾选按钮（框内右上角）
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .offset(x = (l + w + 4).dp, y = (t - 16).dp)
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .size(28.dp)
+                                    .offset(x = (l + w - 32).dp, y = (t + 4).dp)
+                                    .clip(RoundedCornerShape(4.dp))
                                     .background(Color(0xFF00C853))
                                     .clickable { viewModel.acceptPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -592,17 +593,17 @@ fun EditorScreen(
                                 Text(
                                     text = "✓",
                                     color = Color.White,
-                                    fontSize = 18.sp,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            // 红色叉号按钮（勾按钮下方）
+                            // 红色叉号按钮（框内右上角，勾按钮左边）
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .offset(x = (l + w + 4).dp, y = (t + 20).dp)
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .size(28.dp)
+                                    .offset(x = (l + w - 64).dp, y = (t + 4).dp)
+                                    .clip(RoundedCornerShape(4.dp))
                                     .background(Color(0xFFFF5252))
                                     .clickable { viewModel.rejectPendingMask() },
                                 contentAlignment = Alignment.Center
@@ -610,7 +611,7 @@ fun EditorScreen(
                                 Text(
                                     text = "✕",
                                     color = Color.White,
-                                    fontSize = 18.sp,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
