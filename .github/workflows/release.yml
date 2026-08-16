@@ -2,7 +2,7 @@ name: Release APK
 
 on:
   push:
-    branches: [master]
+    branches: [master, fix/v2-ui-save]
   workflow_dispatch:
     inputs:
       build_type:
