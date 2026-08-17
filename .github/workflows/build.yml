@@ -29,31 +29,47 @@ jobs:
       - name: Create local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      - name: Download OpenCV Android SDK
-        run: |
-          echo "Downloading OpenCV 4.9.0 Android SDK..."
-          curl -L -o opencv-sdk.zip "https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-android-sdk.zip"
-          unzip -q opencv-sdk.zip
-          ls -la OpenCV-android-sdk/sdk/native/libs/
+      # OpenCV 由 app/build.gradle.kts 的 org.opencv:opencv:4.9.0 Maven AAR 提供
+      # 包含全部 4 ABI 原生库 + Java 类，无需手动下载/复制 SDK
 
-      - name: Setup OpenCV for project
+      # ─── AI 模型下载（ONNX，轻量 AI 图像修复）──────────────────────────────
+      - name: Download AI ONNX model (MAT)
+        id: download-model
         run: |
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/jniLibs/armeabi-v7a
-          mkdir -p app/src/main/jniLibs/x86
-          mkdir -p app/src/main/jniLibs/x86_64
-          
-          cp OpenCV-android-sdk/sdk/native/libs/arm64-v8a/*.so app/src/main/jniLibs/arm64-v8a/
-          cp OpenCV-android-sdk/sdk/native/libs/armeabi-v7a/*.so app/src/main/jniLibs/armeabi-v7a/
-          cp OpenCV-android-sdk/sdk/native/libs/x86/*.so app/src/main/jniLibs/x86/
-          cp OpenCV-android-sdk/sdk/native/libs/x86_64/*.so app/src/main/jniLibs/x86_64/
-          
-          mkdir -p app/src/main/java/org/opencv
-          cp -r OpenCV-android-sdk/sdk/java/src/org/opencv/* app/src/main/java/org/opencv/
-          
-          echo "OpenCV setup complete:"
-          ls app/src/main/jniLibs/arm64-v8a/
-          ls app/src/main/java/org/opencv/ | head -5
+          mkdir -p app/src/main/assets
+          MODEL_FILE="mat_inpainting.onnx"
+          if [ -f "app/src/main/assets/$MODEL_FILE" ]; then
+            echo "模型已存在: $MODEL_FILE ($(du -h app/src/main/assets/$MODEL_FILE | cut -f1))"
+          else
+            echo "开始下载 ONNX AI 模型..."
+            URLS=(
+              "https://github.com/CS-Presence/quantized-models/releases/download/v1.0/mat_inpainting.onnx"
+              "https://huggingface.co/nicehero/mat-onnx/resolve/main/mat_inpainting.onnx"
+            )
+            for url in "${URLS[@]}"; do
+              echo "尝试: $url"
+              curl -L --retry 3 --retry-delay 5 -o "app/src/main/assets/$MODEL_FILE" \
+                -H "User-Agent: watermark-remover/1.0" \
+                --connect-timeout 30 --max-time 300 -C - \
+                -w "HTTP:%{http_code} SIZE:%{size_download}MB TIME:%{time_total}s" \
+                "$url" 2>&1
+              SIZE=$(du -m "app/src/main/assets/$MODEL_FILE" 2>/dev/null | cut -f1)
+              if [ "$SIZE" -gt 10 ]; then
+                echo "下载成功！大小: ${SIZE}MB"
+                break
+              else
+                echo "下载无效（${SIZE}MB），尝试下一个源"
+                rm -f "app/src/main/assets/$MODEL_FILE"
+              fi
+            done
+            if [ -f "app/src/main/assets/$MODEL_FILE" ]; then
+              echo "✅ ONNX 模型就绪: $(du -h app/src/main/assets/$MODEL_FILE | cut -f1)"
+            else
+              echo "⚠️ 未找到 ONNX 模型，构建将以 OpenCV Telea 替代，AI 效果不可用"
+            fi
+          fi
+          echo "=== assets/ 目录内容 ==="
+          ls -lh app/src/main/assets/ 2>/dev/null || echo "(空目录)"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
