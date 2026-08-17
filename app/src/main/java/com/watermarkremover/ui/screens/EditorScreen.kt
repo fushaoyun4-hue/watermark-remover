@@ -211,29 +211,28 @@ class EditorViewModel @Inject constructor(
         val displayRect = videoDisplayRect
         val pixelSize = videoPixelSize
         val cs = canvasSize
-        val androidRects = masks.map { mask ->
+        val androidMasks = masks.map { mask ->
             val raw = mask.toRectF()
-            if (displayRect != null && pixelSize != null && cs != null && mediaType == "video") {
-                // Canvas 像素坐标
+            val normed = if (displayRect != null && pixelSize != null && cs != null && mediaType == "video") {
                 val canvasL = raw.left * cs.width
                 val canvasT = raw.top * cs.height
                 val canvasR = raw.right * cs.width
                 val canvasB = raw.bottom * cs.height
-                // 视频显示区像素坐标
                 val vidL = (canvasL - displayRect.left).coerceIn(0f, displayRect.width)
                 val vidT = (canvasT - displayRect.top).coerceIn(0f, displayRect.height)
                 val vidR = (canvasR - displayRect.left).coerceIn(0f, displayRect.width)
                 val vidB = (canvasB - displayRect.top).coerceIn(0f, displayRect.height)
-                // 归一化到视频尺寸
                 RectF(
                     vidL / displayRect.width,
                     vidT / displayRect.height,
                     vidR / displayRect.width,
                     vidB / displayRect.height
                 )
-            } else {
-                raw
-            }
+            } else raw
+            VideoProcessor.MaskArea(
+                rect = normed,
+                freehandPoints = null
+            )
         }
 
         viewModelScope.launch {
@@ -255,7 +254,7 @@ class EditorViewModel @Inject constructor(
                     progress = 30
 
                     val result = withContext(Dispatchers.Default) {
-                        videoProcessor.processImage(bitmap, androidRects)
+                        videoProcessor.processImage(bitmap, androidMasks)
                     }
                     bitmap.recycle()
 
@@ -274,7 +273,7 @@ class EditorViewModel @Inject constructor(
                     isProcessing = false
 
                 } else {
-                    videoProcessor.processVideo(mediaUri, androidRects).collectLatest { state ->
+                    videoProcessor.processVideo(mediaUri, androidMasks).collectLatest { state ->
                         when (state) {
                             is VideoProcessor.ProcessState.Progress -> {
                                 progress = state.current
@@ -316,8 +315,8 @@ fun EditorScreen(
     val viewModel: EditorViewModel = androidx.hilt.navigation.compose.hiltViewModel()
 
     var canvasSize by remember { mutableStateOf(Size.Zero) }
-    var dragStart by remember { mutableStateOf(Offset.Zero) }
-    var dragMode by remember { mutableStateOf("none") }
+    var dragStartOffset by remember { mutableStateOf(Offset.Zero) }
+    var dragModeState by remember { mutableStateOf("none") }
     var resizeMaskId by remember { mutableIntStateOf(-1) }
     var resizeEdge by remember { mutableStateOf("") }
 
@@ -539,17 +538,13 @@ fun EditorScreen(
                         }
                         .pointerInput(Unit) {
                             detectDragGestures(
-                                onDragStart = dragStart@{ startPos ->
-                                    // 如果有待确认的框，忽略新拖拽
+                                onDragStart = ds@{ startPos ->
                                     if (viewModel.pendingMask != null) {
-                                        return@dragStart
+                                        return@ds
                                     }
-
                                     val nx = startPos.x / canvasSize.width
                                     val ny = startPos.y / canvasSize.height
                                     val EDGE = 0.04f
-
-                                    // ① 检测是否在已有框的边缘 → 缩放模式
                                     for (m in viewModel.masks) {
                                         val l = minOf(m.left, m.right); val r = maxOf(m.left, m.right)
                                         val t = minOf(m.top, m.bottom); val b = maxOf(m.top, m.bottom)
@@ -558,32 +553,29 @@ fun EditorScreen(
                                         val nearTop   = kotlin.math.abs(ny - t) < EDGE && nx in (l - EDGE)..(r + EDGE)
                                         val nearBottom = kotlin.math.abs(ny - b) < EDGE && nx in (l - EDGE)..(r + EDGE)
                                         if (nearLeft || nearRight || nearTop || nearBottom) {
-                                            dragMode = "resize"
+                                            dragModeState = "resize"
                                             resizeMaskId = m.id
                                             resizeEdge = when {
                                                 nearLeft -> "left"; nearRight -> "right"
                                                 nearTop -> "top"; nearBottom -> "bottom"
                                                 else -> ""
                                             }
-                                            return@dragStart
+                                            return@ds
                                         }
                                     }
-
-                                    // ② 否则 → 新建框
-                                    dragMode = "new"
-                                    dragStart = startPos
+                                    dragModeState = "new"
+                                    dragStartOffset = startPos
                                     resizeMaskId = -1
                                     resizeEdge = ""
                                 },
-                                onDrag = drag@{ change, _ ->
+                                onDrag = dg@{ change, _ ->
                                     change.consume()
                                     val pos = change.position
 
-                                    if (dragMode == "resize" && resizeMaskId >= 0) {
-                                        // 缩放已有框的对应边缘
+                                    if (dragModeState == "resize" && resizeMaskId >= 0) {
                                         val nx = pos.x / canvasSize.width
                                         val ny = pos.y / canvasSize.height
-                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@drag
+                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@dg
                                         val origL = mask.left; val origR = mask.right
                                         val origT = mask.top;   val origB = mask.bottom
                                         when (resizeEdge) {
@@ -592,20 +584,20 @@ fun EditorScreen(
                                             "top"    -> mask.top    = ny.coerceIn(0f, origB - 0.02f)
                                             "bottom" -> mask.bottom = ny.coerceIn(origT + 0.02f, 1f)
                                         }
-                                        viewModel.updateMasks(viewModel.masks.toList())  // 触发重组
-                                    } else if (dragMode == "new") {
+                                        viewModel.updateMasks(viewModel.masks.toList())
+                                    } else if (dragModeState == "new") {
                                         viewModel.updatePendingMask(EditorViewModel.MaskRect(
                                             id = -1,
-                                            left   = minOf(dragStart.x, pos.x) / canvasSize.width,
-                                            top    = minOf(dragStart.y, pos.y) / canvasSize.height,
-                                            right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
-                                            bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
+                                            left   = minOf(dragStartOffset.x, pos.x) / canvasSize.width,
+                                            top    = minOf(dragStartOffset.y, pos.y) / canvasSize.height,
+                                            right  = maxOf(dragStartOffset.x, pos.x) / canvasSize.width,
+                                            bottom = maxOf(dragStartOffset.y, pos.y) / canvasSize.height
                                         ))
                                     }
                                 },
                                 onDragEnd = {
-                                    if (dragMode == "new") viewModel.confirmPendingMask()
-                                    dragMode = "none"
+                                    if (dragModeState == "new") viewModel.confirmPendingMask()
+                                    dragModeState = "none"
                                     resizeMaskId = -1; resizeEdge = ""
                                 }
                             )

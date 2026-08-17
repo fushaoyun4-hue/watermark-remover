@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.net.Uri
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -63,15 +64,27 @@ class VideoProcessor @Inject constructor(
     }
 
     /**
+     * 水印蒙版区域（矩形或手绘多边形）
+     * - rect: 包围盒（归一化坐标 0~1），用于时序平滑 blendMasks
+     * - freehandPoints: 手绘轨迹点（归一化视频坐标 [0,1]），null=矩形模式
+     */
+    data class MaskArea(
+        val rect: RectF,
+        val freehandPoints: List<Pair<Float, Float>>? = null
+    ) {
+        val isFreehand: Boolean get() = !freehandPoints.isNullOrEmpty()
+    }
+
+    /**
      * 处理单帧图片
      *
      * @param bitmap 原图（ARGB_8888）
-     * @param masks  水印区域（归一化坐标 0~1）
+     * @param masks  水印区域
      * @return 修复后图片
      */
     suspend fun processImage(
         bitmap: Bitmap,
-        masks: List<RectF>
+        masks: List<MaskArea>
     ): Bitmap = withContext(Dispatchers.Default) {
         if (masks.isEmpty()) return@withContext bitmap
 
@@ -99,9 +112,11 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 构建蒙版 Bitmap（白色=修复区域，黑色=保留区域）
+     * 矩形：用 Paint.drawRect 扩大绘制
+     * 手绘多边形：用 Path + fill 填充 + 扩大（通过在蒙版上 dilate 实现）
      * 用于 ONNX 模型输入
      */
-    private fun buildMaskBitmap(width: Int, height: Int, masks: List<RectF>): Bitmap {
+    private fun buildMaskBitmap(width: Int, height: Int, masks: List<MaskArea>): Bitmap {
         val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(maskBitmap)
         canvas.drawColor(Color.BLACK)
@@ -112,13 +127,28 @@ class VideoProcessor @Inject constructor(
             isAntiAlias = false
         }
 
-        for (rect in masks) {
-            // 扩大蒙版区域，让 inpainting 有更多上下文，边界更自然
-            val left   = (rect.left   * width - MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
-            val top    = (rect.top    * height - MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
-            val right  = (rect.right  * width + MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
-            val bottom = (rect.bottom * height + MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
-            canvas.drawRect(left, top, right, bottom, paint)
+        for (area in masks) {
+            val rect = area.rect
+            if (area.isFreehand && area.freehandPoints != null) {
+                // 手绘多边形 → 用 Path 绘制封闭多边形
+                val pts = area.freehandPoints
+                if (pts.size >= 3) {
+                    val path = Path()
+                    path.moveTo(pts[0].first * width, pts[0].second * height)
+                    for (i in 1 until pts.size) {
+                        path.lineTo(pts[i].first * width, pts[i].second * height)
+                    }
+                    path.close()
+                    canvas.drawPath(path, paint)
+                }
+            } else {
+                // 矩形：扩大绘制
+                val left   = (rect.left   * width - MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
+                val top    = (rect.top    * height - MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
+                val right  = (rect.right  * width + MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
+                val bottom = (rect.bottom * height + MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
+                canvas.drawRect(left, top, right, bottom, paint)
+            }
         }
         return maskBitmap
     }
@@ -126,7 +156,7 @@ class VideoProcessor @Inject constructor(
     /**
      * OpenCV Telea inpaint（无 AI 模型时的降级路径）
      */
-    private fun fallbackOpenCvInpaint(bitmap: Bitmap, masks: List<RectF>): Bitmap {
+    private fun fallbackOpenCvInpaint(bitmap: Bitmap, masks: List<MaskArea>): Bitmap {
         val width  = bitmap.width
         val height = bitmap.height
 
@@ -138,19 +168,38 @@ class VideoProcessor @Inject constructor(
         Imgproc.cvtColor(src, srcBgr, Imgproc.COLOR_RGBA2BGR)
         src.release()
 
-        // 构建蒙版 Mat（扩大 MASK_EXPAND_PX 像素，扩大 dilate 核）
+        // 构建蒙版 Mat
         val mask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
-        for (rect in masks) {
-            val left   = (rect.left   * width - MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
-            val top    = (rect.top    * height - MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
-            val right  = (rect.right  * width + MASK_EXPAND_PX).toInt().coerceIn(left + 1, width)
-            val bottom = (rect.bottom * height + MASK_EXPAND_PX).toInt().coerceIn(top + 1, height)
-            Imgproc.rectangle(
-                mask,
-                org.opencv.core.Point(left.toDouble(), top.toDouble()),
-                org.opencv.core.Point(right.toDouble(), bottom.toDouble()),
-                Scalar(255.0), -1
-            )
+        for (area in masks) {
+            val rect = area.rect
+            if (area.isFreehand && area.freehandPoints != null) {
+                // 手绘多边形：先在蒙版上画多边形，再 dilate 扩大
+                val pts = area.freehandPoints
+                if (pts.size >= 3) {
+                    val intPts = pts.map {
+                        org.opencv.core.Point(
+                            (it.first  * width).toDouble().coerceIn(0.0, width.toDouble()),
+                            (it.second * height).toDouble().coerceIn(0.0, height.toDouble())
+                        )
+                    }
+                    val hull = org.opencv.core.MatOfPoint()
+                    hull.fromList(intPts)
+                    Imgproc.fillPoly(mask, listOf(hull), Scalar(255.0))
+                    hull.release()
+                }
+            } else {
+                // 矩形蒙版（扩大 MASK_EXPAND_PX）
+                val left   = (rect.left   * width - MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
+                val top    = (rect.top    * height - MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
+                val right  = (rect.right  * width + MASK_EXPAND_PX).toInt().coerceIn(left + 1, width)
+                val bottom = (rect.bottom * height + MASK_EXPAND_PX).toInt().coerceIn(top + 1, height)
+                Imgproc.rectangle(
+                    mask,
+                    org.opencv.core.Point(left.toDouble(), top.toDouble()),
+                    org.opencv.core.Point(right.toDouble(), bottom.toDouble()),
+                    Scalar(255.0), -1
+                )
+            }
         }
 
         // 适度膨胀（5x5 核），让边缘羽化过渡更自然
@@ -182,7 +231,7 @@ class VideoProcessor @Inject constructor(
      */
     fun processVideo(
         videoUri: Uri,
-        masks: List<RectF>
+        masks: List<MaskArea>
     ): Flow<ProcessState> = flow {
         try {
             val timestamp = System.currentTimeMillis()
@@ -214,7 +263,7 @@ class VideoProcessor @Inject constructor(
             val modelDesc = if (onnxInpainter.hasModel) "（AI 模型）" else "（OpenCV）"
             emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
 
-            var prevMasks: List<RectF>? = null  // 上一帧融合后的蒙版
+            var prevMasks: List<MaskArea>? = null  // 上一帧融合后的蒙版
 
             for ((idx, frameFile) in frameFiles.withIndex()) {
                 val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath,
@@ -271,26 +320,30 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 带时序平滑的单帧处理
-     * prevMasks: 上一帧的蒙版区域（RectF 列表，归一化坐标）
+     * prevMasks: 上一帧的蒙版区域（MaskArea 列表）
      * alpha: 平滑强度 0.0~1.0，值越大蒙版越稳定（闪烁越小但响应越慢）
      * 返回：融合了历史信息的当前帧蒙版
      */
     private fun blendMasks(
-        currentMasks: List<RectF>,
-        prevMasks: List<RectF>?,
+        currentMasks: List<MaskArea>,
+        prevMasks: List<MaskArea>?,
         alpha: Float = 0.7f
-    ): List<RectF> {
+    ): List<MaskArea> {
         if (prevMasks == null || prevMasks.isEmpty()) return currentMasks
         if (currentMasks.size != prevMasks.size) return currentMasks
 
-        // 时序平滑：蒙版边缘在历史位置和当前位置之间加权融合
-        // 效果：字幕移动时蒙版不会跳变，而是缓慢跟随 → 消除拉丝
+        // 时序平滑：对包围盒进行 alpha 混合，保留 freehandPoints（形状不变）
+        // 效果：字幕移动时蒙版缓慢跟随 → 消除动态水印的拉丝闪烁
         return currentMasks.zip(prevMasks) { cur, prev ->
-            RectF(
-                (cur.left   * (1 - alpha) + prev.left   * alpha),
-                (cur.top    * (1 - alpha) + prev.top    * alpha),
-                (cur.right  * (1 - alpha) + prev.right  * alpha),
-                (cur.bottom * (1 - alpha) + prev.bottom * alpha)
+            val curRect = cur.rect; val prevRect = prev.rect
+            MaskArea(
+                rect = RectF(
+                    (curRect.left   * (1 - alpha) + prevRect.left   * alpha),
+                    (curRect.top    * (1 - alpha) + prevRect.top    * alpha),
+                    (curRect.right  * (1 - alpha) + prevRect.right  * alpha),
+                    (curRect.bottom * (1 - alpha) + prevRect.bottom * alpha)
+                ),
+                freehandPoints = cur.freehandPoints  // 保留手绘形状
             )
         }
     }
@@ -302,9 +355,9 @@ class VideoProcessor @Inject constructor(
      */
     private suspend fun processFrameWithSmoothing(
         bitmap: Bitmap,
-        rawMasks: List<RectF>,
-        prevMasks: List<RectF>?
-    ): Pair<Bitmap, List<RectF>> = withContext(Dispatchers.Default) {
+        rawMasks: List<MaskArea>,
+        prevMasks: List<MaskArea>?
+    ): Pair<Bitmap, List<MaskArea>> = withContext(Dispatchers.Default) {
         // 1. 时序融合蒙版
         val blendedMasks = blendMasks(rawMasks, prevMasks, alpha = 0.65f)
 
