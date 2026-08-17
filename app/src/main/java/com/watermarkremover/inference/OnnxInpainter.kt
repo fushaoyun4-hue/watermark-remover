@@ -79,10 +79,10 @@ class OnnxInpainter @Inject constructor(
 
             // 动态获取输入节点名（适配不同模型）
             val inputNames = session!!.inputNames
-            imageInputName = inputNames.keys.find {
+            imageInputName = inputNames.find {
                 it.lowercase().contains("image") || it == "input" || it == "x"
-            } ?: inputNames.keys.elementAtOrElse(0) { "input" }
-            maskInputName  = inputNames.keys.elementAtOrElse(1) { "mask" }
+            } ?: inputNames.getOrElse(0) { "input" }
+            maskInputName  = inputNames.getOrElse(1) { "mask" }
 
             tempFile.delete()
 
