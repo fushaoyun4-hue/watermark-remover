@@ -78,8 +78,9 @@ class OnnxInpainter @Inject constructor(
             loadedModelName = modelFileName
 
             // 动态获取输入节点名（适配不同模型）
-            val inputNames: List<String> = session!!.inputNames as? List<String>
-                ?: throw IllegalStateException("ONNX session inputNames is not a List: ${session!!.inputNames::class.java}")
+            val rawInputNames = session!!.inputNames
+            val inputNames: List<String> = rawInputNames as? List<String>
+                ?: throw IllegalStateException("ONNX session inputNames is not a List: ${rawInputNames::class.java}")
             val found = inputNames.find {
                 it.lowercase().contains("image") || it == "input" || it == "x"
             }
