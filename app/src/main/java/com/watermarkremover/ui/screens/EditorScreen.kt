@@ -27,10 +27,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -75,7 +78,9 @@ class EditorViewModel @Inject constructor(
         var left: Float,
         var top: Float,
         var right: Float,
-        var bottom: Float
+        var bottom: Float,
+        /** 手绘轨迹的归一化坐标点（可选，用于手绘蒙版） */
+        var freehandPoints: List<Pair<Float, Float>>? = null
     ) {
         val width  get() = kotlin.math.abs(right - left)
         val height get() = kotlin.math.abs(bottom - top)
@@ -96,6 +101,10 @@ class EditorViewModel @Inject constructor(
 
     /** 正在拖拽的临时框（null = 没有在画新框） */
     var pendingMask by mutableStateOf<MaskRect?>(null)
+        private set
+
+    /** pendingMask 对应的手绘轨迹点（归一化坐标），用于 Canvas 渲染 */
+    var pendingFreehandPoints by mutableStateOf<List<Pair<Float, Float>>>(emptyList())
         private set
 
     /** 是否正在处理中 */
@@ -165,8 +174,14 @@ class EditorViewModel @Inject constructor(
     /** 用户点击勾选 → 正式加入 masks，关闭待确认 */
     fun acceptPendingMask() {
         val p = pendingMask ?: return
-        masks = masks + p
+        val accepted = MaskRect(
+            id = nextId++,
+            left = p.left, top = p.top, right = p.right, bottom = p.bottom,
+            freehandPoints = p.freehandPoints
+        )
+        masks = masks + accepted
         pendingMask = null
+        pendingFreehandPoints = emptyList()
     }
 
     /** 用户点击叉号 → 取消待确认的框 */
@@ -182,6 +197,28 @@ class EditorViewModel @Inject constructor(
         pendingMask = rect
     }
 
+    /** Ray-casting 算法：判断归一化坐标 (nx, ny) 是否在多边形内部 */
+    fun isInsidePolygon(nx: Float, ny: Float, polygon: List<Pair<Float, Float>>): Boolean {
+        if (polygon.size < 3) return false
+        var inside = false
+        var j = polygon.lastIndex
+        for (i in polygon.indices) {
+            val (xi, yi) = polygon[i]
+            val (xj, yj) = polygon[j]
+            if (((yi > ny) != (yj > ny)) &&
+                (nx < (xj - xi) * (ny - yi) / ((yj - yi).coerceAtLeast(0.0001f)) + xi)) {
+                inside = !inside
+            }
+            j = i
+        }
+        return inside
+    }
+
+    /** 清除手绘轨迹 */
+    fun clearPendingFreehandPoints() {
+        pendingFreehandPoints = emptyList()
+    }
+
     fun removeMask(id: Int) {
         masks = masks.filter { it.id != id }
     }
@@ -189,6 +226,7 @@ class EditorViewModel @Inject constructor(
     fun clearMasks() {
         masks = emptyList()
         pendingMask = null
+        pendingFreehandPoints = emptyList()
     }
 
     fun startProcessing(
@@ -231,7 +269,7 @@ class EditorViewModel @Inject constructor(
             } else raw
             VideoProcessor.MaskArea(
                 rect = normed,
-                freehandPoints = null
+                freehandPoints = mask.freehandPoints
             )
         }
 
@@ -315,10 +353,13 @@ fun EditorScreen(
     val viewModel: EditorViewModel = androidx.hilt.navigation.compose.hiltViewModel()
 
     var canvasSize by remember { mutableStateOf(Size.Zero) }
-    var dragStartOffset by remember { mutableStateOf(Offset.Zero) }
-    var dragModeState by remember { mutableStateOf("none") }
-    var resizeMaskId by remember { mutableIntStateOf(-1) }
-    var resizeEdge by remember { mutableStateOf("") }
+
+    /** 正在绘制的手绘轨迹点（屏幕坐标） */
+    var currentFreehandPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
+
+    /** 是否正在画自由曲线 */
+    var isDrawingFreehand by remember { mutableStateOf(false) }
+    var lastDragPos by remember { mutableStateOf(Offset.Zero) }
 
     // 视频预览（首帧）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -445,16 +486,15 @@ fun EditorScreen(
                     when {
                         viewModel.masks.isEmpty() && viewModel.pendingMask == null -> {
                             Text(
-                                text = "👆 在画面上拖动框选水印区域，可选多个",
+                                text = "✍️ 在画面上手指画圈圈住水印/字幕，松手自动填充，点击框内可删除",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(bottom = 8.dp)
                             )
                         }
                         viewModel.pendingMask != null -> {
-                            // 有待确认的框，显示勾选提示
                             Text(
-                                text = "✅ 请点击右上角 ✓ 确认此区域，或点击 ✕ 重新框选",
+                                text = "✅ 请点击右上角 ✓ 确认此区域，或点击 ✕ 重新圈选",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -462,7 +502,7 @@ fun EditorScreen(
                         }
                         else -> {
                             Text(
-                                text = "✅ 已框选 ${viewModel.masks.size} 个区域：空白拖动新建，边缘拖动调整大小，点击框内删除",
+                                text = "✅ 已圈选 ${viewModel.masks.size} 个区域：空白处画圈新增，点击框内删除",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -537,68 +577,65 @@ fun EditorScreen(
                             )
                         }
                         .pointerInput(Unit) {
-                            detectDragGestures(
-                                onDragStart = ds@{ startPos ->
+                            detectTapGestures(
+                                onTap = { tapPos ->
+                                    val nx = tapPos.x / canvasSize.width
+                                    val ny = tapPos.y / canvasSize.height
                                     if (viewModel.pendingMask != null) {
-                                        return@ds
+                                        val p = viewModel.pendingMask!!
+                                        val pl = minOf(p.left, p.right); val pr = maxOf(p.left, p.right)
+                                        val pt = minOf(p.top, p.bottom); val pb = maxOf(p.top, p.bottom)
+                                        if (nx !in pl..pr || ny !in pt..pb) {
+                                            viewModel.rejectPendingMask()
+                                        }
+                                        return@detectTapGestures
                                     }
-                                    val nx = startPos.x / canvasSize.width
-                                    val ny = startPos.y / canvasSize.height
-                                    val EDGE = 0.04f
-                                    for (m in viewModel.masks) {
+                                    val tapped = viewModel.masks.findLast { m ->
                                         val l = minOf(m.left, m.right); val r = maxOf(m.left, m.right)
-                                        val t = minOf(m.top, m.bottom); val b = maxOf(m.top, m.bottom)
-                                        val nearLeft   = kotlin.math.abs(nx - l) < EDGE && ny in (t - EDGE)..(b + EDGE)
-                                        val nearRight  = kotlin.math.abs(nx - r) < EDGE && ny in (t - EDGE)..(b + EDGE)
-                                        val nearTop   = kotlin.math.abs(ny - t) < EDGE && nx in (l - EDGE)..(r + EDGE)
-                                        val nearBottom = kotlin.math.abs(ny - b) < EDGE && nx in (l - EDGE)..(r + EDGE)
-                                        if (nearLeft || nearRight || nearTop || nearBottom) {
-                                            dragModeState = "resize"
-                                            resizeMaskId = m.id
-                                            resizeEdge = when {
-                                                nearLeft -> "left"; nearRight -> "right"
-                                                nearTop -> "top"; nearBottom -> "bottom"
-                                                else -> ""
-                                            }
-                                            return@ds
-                                        }
+                                        val t = minOf(m.top, m.bottom);  val b = maxOf(m.top, m.bottom)
+                                        nx in l..r && ny in t..b
                                     }
-                                    dragModeState = "new"
-                                    dragStartOffset = startPos
-                                    resizeMaskId = -1
-                                    resizeEdge = ""
+                                    if (tapped != null) viewModel.removeMask(tapped.id)
+                                }
+                            )
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = { startPos ->
+                                    if (viewModel.pendingMask != null) return@detectDragGestures
+                                    lastDragPos = startPos
+                                    currentFreehandPoints = listOf(startPos)
+                                    isDrawingFreehand = true
                                 },
-                                onDrag = dg@{ change, _ ->
+                                onDrag = { change, _ ->
                                     change.consume()
-                                    val pos = change.position
-
-                                    if (dragModeState == "resize" && resizeMaskId >= 0) {
-                                        val nx = pos.x / canvasSize.width
-                                        val ny = pos.y / canvasSize.height
-                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@dg
-                                        val origL = mask.left; val origR = mask.right
-                                        val origT = mask.top;   val origB = mask.bottom
-                                        when (resizeEdge) {
-                                            "left"   -> mask.left   = nx.coerceIn(0f, origR - 0.02f)
-                                            "right"  -> mask.right  = nx.coerceIn(origL + 0.02f, 1f)
-                                            "top"    -> mask.top    = ny.coerceIn(0f, origB - 0.02f)
-                                            "bottom" -> mask.bottom = ny.coerceIn(origT + 0.02f, 1f)
-                                        }
-                                        viewModel.updateMasks(viewModel.masks.toList())
-                                    } else if (dragModeState == "new") {
-                                        viewModel.updatePendingMask(EditorViewModel.MaskRect(
-                                            id = -1,
-                                            left   = minOf(dragStartOffset.x, pos.x) / canvasSize.width,
-                                            top    = minOf(dragStartOffset.y, pos.y) / canvasSize.height,
-                                            right  = maxOf(dragStartOffset.x, pos.x) / canvasSize.width,
-                                            bottom = maxOf(dragStartOffset.y, pos.y) / canvasSize.height
-                                        ))
-                                    }
+                                    lastDragPos = change.position
+                                    val pts = currentFreehandPoints.toMutableList()
+                                    pts.add(change.position)
+                                    currentFreehandPoints = pts
                                 },
                                 onDragEnd = {
-                                    if (dragModeState == "new") viewModel.confirmPendingMask()
-                                    dragModeState = "none"
-                                    resizeMaskId = -1; resizeEdge = ""
+                                    isDrawingFreehand = false
+                                    val pts = currentFreehandPoints
+                                    currentFreehandPoints = emptyList()
+                                    if (pts.size < 3) return@detectDragGestures
+                                    val freehandNormPts = pts.map {
+                                        Pair(it.x / canvasSize.width, it.y / canvasSize.height)
+                                    }
+                                    val xs = freehandNormPts.map { it.first }
+                                    val ys = freehandNormPts.map { it.second }
+                                    val nl = xs.minOrNull() ?: return@detectDragGestures
+                                    val nr = xs.maxOrNull() ?: return@detectDragGestures
+                                    val nt = ys.minOrNull() ?: return@detectDragGestures
+                                    val nb = ys.maxOrNull() ?: return@detectDragGestures
+                                    if ((nr - nl) > 0.02f && (nb - nt) > 0.02f) {
+                                        viewModel.updatePendingMask(EditorViewModel.MaskRect(
+                                            id = -1,
+                                            left = nl, top = nt, right = nr, bottom = nb,
+                                            freehandPoints = freehandNormPts
+                                        ))
+                                        viewModel.confirmPendingMask()
+                                    }
                                 }
                             )
                         }
@@ -634,29 +671,57 @@ fun EditorScreen(
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val borderPx = 2.dp.toPx()
 
-                        // ---- 已确认的框：绿色边框 ----
+                                        // ---- 已确认的框：绿色边框（手绘显示为路径，矩形显示为矩形）----
                         viewModel.masks.forEach { mask ->
-                            val l = minOf(mask.left,  mask.right)  * size.width
-                            val t = minOf(mask.top,   mask.bottom) * size.height
-                            val r = maxOf(mask.left,  mask.right)  * size.width
-                            val b = maxOf(mask.top,   mask.bottom) * size.height
-                            val w = r - l
-                            val h = b - t
+                            val isFreehand = !mask.freehandPoints.isNullOrEmpty()
+                            val color = Color(0xFF00C853)
 
-                            drawRect(
-                                color = Color(0xFF00C853).copy(alpha = 0.22f),
-                                topLeft = Offset(l, t),
-                                size = Size(w, h)
+                            if (isFreehand) {
+                                // 手绘：绘制封闭 Path
+                                val pts = mask.freehandPoints!!
+                                if (pts.size >= 3) {
+                                    val path = Path()
+                                    path.moveTo(pts[0].first * size.width, pts[0].second * size.height)
+                                    for (i in 1 until pts.size) {
+                                        path.lineTo(pts[i].first * size.width, pts[i].second * size.height)
+                                    }
+                                    path.close()
+                                    drawPath(path, color.copy(alpha = 0.22f), style = Fill)
+                                    drawPath(path, color, style = Stroke(width = borderPx))
+                                }
+                            } else {
+                                // 矩形
+                                val l = minOf(mask.left,  mask.right)  * size.width
+                                val t = minOf(mask.top,   mask.bottom) * size.height
+                                val w = kotlin.math.abs(mask.right - mask.left) * size.width
+                                val h = kotlin.math.abs(mask.bottom - mask.top) * size.height
+                                drawRect(color.copy(alpha = 0.22f), topLeft = Offset(l, t), size = Size(w, h))
+                                drawRect(color, topLeft = Offset(l, t), size = Size(w, h), style = Stroke(width = borderPx))
+                            }
+                        }
+
+                        // ---- 正在画的自由曲线：蓝色半透明填充 + 虚线边框 ----
+                        if (currentFreehandPoints.isNotEmpty()) {
+                            val path = Path()
+                            path.moveTo(currentFreehandPoints[0].x, currentFreehandPoints[0].y)
+                            for (i in 1 until currentFreehandPoints.size) {
+                                path.lineTo(currentFreehandPoints[i].x, currentFreehandPoints[i].y)
+                            }
+                            // 填充已围成区域
+                            drawPath(
+                                path = path,
+                                color = Color(0xFF2196F3).copy(alpha = 0.3f),
+                                style = Fill
                             )
-                            drawRect(
-                                color = Color(0xFF00C853),
-                                topLeft = Offset(l, t),
-                                size = Size(w, h),
-                                style = Stroke(width = borderPx)
+                            // 蓝色实线描边
+                            drawPath(
+                                path = path,
+                                color = Color(0xFF2196F3),
+                                style = Stroke(width = borderPx * 1.5f)
                             )
                         }
 
-                        // ---- 待确认的框：蓝色虚线 + 右上角勾叉按钮 ----
+                        // ---- 待确认的框：蓝色虚线 ----
                         viewModel.pendingMask?.let { p ->
                             val l = minOf(p.left,  p.right) * size.width
                             val t = minOf(p.top,   p.bottom) * size.height
@@ -679,7 +744,6 @@ fun EditorScreen(
                                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
                                 )
                             )
-
                         }
                     }
 
