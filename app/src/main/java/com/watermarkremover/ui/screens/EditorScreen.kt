@@ -312,6 +312,9 @@ fun EditorScreen(
 
     var canvasSize by remember { mutableStateOf(Size.Zero) }
     var dragStart by remember { mutableStateOf(Offset.Zero) }
+    var dragMode by remember { mutableStateOf("none") }
+    var resizeMaskId by remember { mutableIntStateOf(-1) }
+    var resizeEdge by remember { mutableStateOf("") }
 
     // 视频预览（首帧）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -455,7 +458,7 @@ fun EditorScreen(
                         }
                         else -> {
                             Text(
-                                text = "✅ 已框选 ${viewModel.masks.size} 个区域，点击绿色区域可删除",
+                                text = "✅ 已框选 ${viewModel.masks.size} 个区域：空白拖动新建，边缘拖动调整大小，点击框内删除"
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -532,42 +535,73 @@ fun EditorScreen(
                         .pointerInput(Unit) {
                             detectDragGestures(
                                 onDragStart = { startPos ->
-                                    // 如果有待确认的框，先处理它
+                                    // 如果有待确认的框，忽略新拖拽
                                     if (viewModel.pendingMask != null) {
-                                        return@detectDragGestures  // 忽略新的拖拽
+                                        return@detectDragGestures
                                     }
-                                    
-                                    val nx0 = startPos.x / canvasSize.width
-                                    val ny0 = startPos.y / canvasSize.height
-                                    val hitMask = viewModel.masks.find { m ->
-                                        nx0 >= minOf(m.left, m.right) - 0.02f &&
-                                        nx0 <= maxOf(m.left, m.right) + 0.02f &&
-                                        ny0 >= minOf(m.top,  m.bottom) - 0.02f &&
-                                        ny0 <= maxOf(m.top,  m.bottom) + 0.02f
+
+                                    val nx = startPos.x / canvasSize.width
+                                    val ny = startPos.y / canvasSize.height
+                                    val EDGE = 0.04f
+
+                                    // ① 检测是否在已有框的边缘 → 缩放模式
+                                    for (m in viewModel.masks) {
+                                        val l = minOf(m.left, m.right); val r = maxOf(m.left, m.right)
+                                        val t = minOf(m.top, m.bottom); val b = maxOf(m.top, m.bottom)
+                                        val nearLeft   = kotlin.math.abs(nx - l) < EDGE && ny in (t - EDGE)..(b + EDGE)
+                                        val nearRight  = kotlin.math.abs(nx - r) < EDGE && ny in (t - EDGE)..(b + EDGE)
+                                        val nearTop   = kotlin.math.abs(ny - t) < EDGE && nx in (l - EDGE)..(r + EDGE)
+                                        val nearBottom = kotlin.math.abs(ny - b) < EDGE && nx in (l - EDGE)..(r + EDGE)
+                                        if (nearLeft || nearRight || nearTop || nearBottom) {
+                                            dragMode = "resize"
+                                            resizeMaskId = m.id
+                                            resizeEdge = when {
+                                                nearLeft -> "left"; nearRight -> "right"
+                                                nearTop -> "top"; nearBottom -> "bottom"
+                                                else -> ""
+                                            }
+                                            return@detectDragGestures
+                                        }
                                     }
-                                    if (hitMask != null) {
-                                        // 点击已确认框 → 删除
-                                        viewModel.removeMask(hitMask.id)
-                                    } else {
-                                        // 空白处开始拖拽新建框
-                                        dragStart = startPos
-                                    }
+
+                                    // ② 否则 → 新建框
+                                    dragMode = "new"
+                                    dragStart = startPos
+                                    resizeMaskId = -1
+                                    resizeEdge = ""
                                 },
                                 onDrag = { change, _ ->
                                     change.consume()
                                     val pos = change.position
-                                    viewModel.updatePendingMask(EditorViewModel.MaskRect(
-                                        id = -1,
-                                        left   = minOf(dragStart.x, pos.x) / canvasSize.width,
-                                        top    = minOf(dragStart.y, pos.y) / canvasSize.height,
-                                        right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
-                                        bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
-                                    ))
+
+                                    if (dragMode == "resize" && resizeMaskId >= 0) {
+                                        // 缩放已有框的对应边缘
+                                        val nx = pos.x / canvasSize.width
+                                        val ny = pos.y / canvasSize.height
+                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@detectDragGestures
+                                        val origL = mask.left; val origR = mask.right
+                                        val origT = mask.top;   val origB = mask.bottom
+                                        when (resizeEdge) {
+                                            "left"   -> mask.left   = nx.coerceIn(0f, origR - 0.02f)
+                                            "right"  -> mask.right  = nx.coerceIn(origL + 0.02f, 1f)
+                                            "top"    -> mask.top    = ny.coerceIn(0f, origB - 0.02f)
+                                            "bottom" -> mask.bottom = ny.coerceIn(origT + 0.02f, 1f)
+                                        }
+                                        viewModel.masks = viewModel.masks.toList()  // 触发重组
+                                    } else if (dragMode == "new") {
+                                        viewModel.updatePendingMask(EditorViewModel.MaskRect(
+                                            id = -1,
+                                            left   = minOf(dragStart.x, pos.x) / canvasSize.width,
+                                            top    = minOf(dragStart.y, pos.y) / canvasSize.height,
+                                            right  = maxOf(dragStart.x, pos.x) / canvasSize.width,
+                                            bottom = maxOf(dragStart.y, pos.y) / canvasSize.height
+                                        ))
+                                    }
                                 },
                                 onDragEnd = {
-                                    // 规范化坐标（确保 left<right, top<bottom）
-                                    viewModel.confirmPendingMask()
-                                    // 不自动加入 masks，保留 pendingMask 等用户点 ✓/✕
+                                    if (dragMode == "new") viewModel.confirmPendingMask()
+                                    dragMode = "none"
+                                    resizeMaskId = -1; resizeEdge = ""
                                 }
                             )
                         }
@@ -602,7 +636,6 @@ fun EditorScreen(
                     // 蒙版绘制层
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val borderPx = 2.dp.toPx()
-                        val btnPx   = 16.dp.toPx()
 
                         // ---- 已确认的框：绿色边框 ----
                         viewModel.masks.forEach { mask ->
@@ -649,19 +682,6 @@ fun EditorScreen(
                                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
                                 )
                             )
-
-                            // ── 四角拖拽手柄（视觉提示）──
-                            val handleR = 10.dp.toPx()
-                            val handleC = Color(0xFF2196F3)
-                            listOf(
-                                Offset(l, t),
-                                Offset(l + w, t),
-                                Offset(l, t + h),
-                                Offset(l + w, t + h)
-                            ).forEach { pos ->
-                                drawCircle(color = handleC, radius = handleR, center = pos)
-                                drawCircle(color = Color.White, radius = handleR * 0.5f, center = pos)
-                            }
 
                         }
                     }

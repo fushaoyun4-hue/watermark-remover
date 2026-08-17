@@ -41,35 +41,7 @@ import java.io.FileOutputStream
 
 import com.watermarkremover.ui.theme.WatermarkRemoverTheme
 
-/**
- * 执行保存（提取为顶层函数供权限回调使用）
- */
-private fun performSave(
-    context: Context,
-    processedUri: String,
-    mediaType: String,
-    scope: kotlinx.coroutines.CoroutineScope,
-    onResult: (String?) -> Unit
-) {
-    scope.launch {
-        try {
-            val saved = withContext(Dispatchers.IO) {
-                val sourceUri = Uri.parse(processedUri)
-                val fileName = "watermark_removed_${System.currentTimeMillis()}"
 
-                if (mediaType == "video") {
-                    saveVideoToGallery(context, sourceUri, fileName)
-                } else {
-                    saveImageToGallery(context, sourceUri, fileName)
-                }
-            }
-            onResult(saved)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            onResult(null)
-        }
-    }
-}
 
 /**
  * 结果页：处理完成，提供保存按钮（不显示对比）
@@ -86,24 +58,48 @@ fun ResultScreen(
     val scope = rememberCoroutineScope()
     var isSaving by remember { mutableStateOf(false) }
     var savedPath by remember { mutableStateOf<String?>(null) }
+    var saveProgress by remember { mutableStateOf(0) }  // 保存进度 0-100
+
+    // 统一的保存逻辑（不再通过 callback，避免 rememberCoroutineScope 失效问题）
+    fun doSave() {
+        if (isSaving || savedPath != null) return
+        isSaving = true
+        saveProgress = 0
+
+        scope.launch {
+            try {
+                val saved = withContext(Dispatchers.IO) {
+                    val sourceUri = Uri.parse(processedUri)
+                    val fileName = "watermark_removed_${System.currentTimeMillis()}"
+                    saveProgress = 30
+                    if (mediaType == "video") {
+                        saveVideoToGallery(context, sourceUri, fileName)
+                    } else {
+                        saveImageToGallery(context, sourceUri, fileName)
+                    }.also { saveProgress = 100 }
+                }
+                isSaving = false
+                savedPath = saved
+                if (saved != null) {
+                    Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                isSaving = false
+                Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     // Android 9- 需要运行时权限
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            // 权限授予后执行保存
-            performSave(context, processedUri, mediaType, scope) { path ->
-                isSaving = false
-                savedPath = path
-                if (path != null) {
-                    Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
-                }
-            }
+            doSave()
         } else {
-            isSaving = false
             Toast.makeText(context, "需要存储权限才能保存", Toast.LENGTH_SHORT).show()
         }
     }
@@ -111,18 +107,9 @@ fun ResultScreen(
     fun saveToGallery() {
         if (isSaving || savedPath != null) return
 
-        // Android 10+ 不需要权限
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            isSaving = true
-            performSave(context, processedUri, mediaType, scope) { path ->
-                isSaving = false
-                savedPath = path
-                if (path != null) {
-                    Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
-                }
-            }
+            // Android 10+ 不需要权限
+            doSave()
         } else {
             // Android 9- 检查权限
             if (ContextCompat.checkSelfPermission(
@@ -130,18 +117,8 @@ fun ResultScreen(
                     Manifest.permission.WRITE_EXTERNAL_STORAGE
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                isSaving = true
-                performSave(context, processedUri, mediaType, scope) { path ->
-                    isSaving = false
-                    savedPath = path
-                    if (path != null) {
-                        Toast.makeText(context, "已保存到相册", Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                doSave()
             } else {
-                // 请求权限
                 permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
         }
@@ -191,6 +168,24 @@ fun ResultScreen(
                         color = MaterialTheme.colorScheme.primary,
                         textAlign = TextAlign.Center
                     )
+                } else if (isSaving) {
+                    // 保存进度指示
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "保存中... ${saveProgress}%",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        @Suppress("DEPRECATION")
+                        LinearProgressIndicator(
+                            progress = (saveProgress / 100f).coerceIn(0f, 1f),
+                            modifier = Modifier.fillMaxWidth(0.8f).height(6.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        )
+                    }
                 } else {
                     Text(
                         text = "点击下方按钮保存到手机相册",
@@ -213,11 +208,16 @@ fun ResultScreen(
                 ) {
                     if (isSaving) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            color = Color.White
+                            modifier = Modifier.size(20.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
                         )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("保存中...")
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("保存中 ${saveProgress}%...")
+                    } else if (savedPath != null) {
+                        Icon(Icons.Filled.CheckCircle, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("已保存", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     } else {
                         Icon(Icons.Filled.SaveAlt, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
@@ -225,7 +225,7 @@ fun ResultScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // 继续处理按钮
                 TextButton(

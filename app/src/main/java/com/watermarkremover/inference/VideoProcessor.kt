@@ -51,6 +51,9 @@ class VideoProcessor @Inject constructor(
 
         // JPEG 压缩质量：帧质量，影响输出清晰度和文件大小
         private const val FRAME_QUALITY = 90
+
+        // 蒙版扩大像素数（边缘羽化，让 AI/OpenCV 有更多上下文，边界更自然）
+        private const val MASK_EXPAND_PX = 6
     }
 
     sealed class ProcessState {
@@ -110,10 +113,11 @@ class VideoProcessor @Inject constructor(
         }
 
         for (rect in masks) {
-            val left   = (rect.left   * width).coerceIn(0f, width.toFloat())
-            val top    = (rect.top    * height).coerceIn(0f, height.toFloat())
-            val right  = (rect.right  * width).coerceIn(0f, width.toFloat())
-            val bottom = (rect.bottom * height).coerceIn(0f, height.toFloat())
+            // 扩大蒙版区域，让 inpainting 有更多上下文，边界更自然
+            val left   = (rect.left   * width - MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
+            val top    = (rect.top    * height - MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
+            val right  = (rect.right  * width + MASK_EXPAND_PX).coerceIn(0f, width.toFloat())
+            val bottom = (rect.bottom * height + MASK_EXPAND_PX).coerceIn(0f, height.toFloat())
             canvas.drawRect(left, top, right, bottom, paint)
         }
         return maskBitmap
@@ -134,13 +138,13 @@ class VideoProcessor @Inject constructor(
         Imgproc.cvtColor(src, srcBgr, Imgproc.COLOR_RGBA2BGR)
         src.release()
 
-        // 构建蒙版 Mat
+        // 构建蒙版 Mat（扩大 MASK_EXPAND_PX 像素，扩大 dilate 核）
         val mask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
         for (rect in masks) {
-            val left   = (rect.left   * width).toInt().coerceIn(0, width - 1)
-            val top    = (rect.top    * height).toInt().coerceIn(0, height - 1)
-            val right  = (rect.right  * width).toInt().coerceIn(left + 1, width)
-            val bottom = (rect.bottom * height).toInt().coerceIn(top + 1, height)
+            val left   = (rect.left   * width - MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
+            val top    = (rect.top    * height - MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
+            val right  = (rect.right  * width + MASK_EXPAND_PX).toInt().coerceIn(left + 1, width)
+            val bottom = (rect.bottom * height + MASK_EXPAND_PX).toInt().coerceIn(top + 1, height)
             Imgproc.rectangle(
                 mask,
                 org.opencv.core.Point(left.toDouble(), top.toDouble()),
@@ -149,8 +153,8 @@ class VideoProcessor @Inject constructor(
             )
         }
 
-        // 轻微膨胀，让边缘过渡更自然
-        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, org.opencv.core.Size(3.0, 3.0))
+        // 适度膨胀（5x5 核），让边缘羽化过渡更自然
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, org.opencv.core.Size(5.0, 5.0))
         Imgproc.dilate(mask, mask, kernel)
         kernel.release()
 
@@ -206,16 +210,21 @@ class VideoProcessor @Inject constructor(
                 return@flow
             }
 
-            // 阶段2：逐帧 AI 修复
+            // 阶段2：逐帧 AI 修复（带时序平滑）
             val modelDesc = if (onnxInpainter.hasModel) "（AI 模型）" else "（OpenCV）"
             emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
+
+            var prevMasks: List<RectF>? = null  // 上一帧融合后的蒙版
 
             for ((idx, frameFile) in frameFiles.withIndex()) {
                 val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath,
                     BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
 
                 if (bitmap != null) {
-                    val repaired = processImage(bitmap, masks)
+                    // 时序平滑处理（prevMasks 会在内部自动融合并传递）
+                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, masks, prevMasks)
+                    prevMasks = blendedMasks  // 保留给下一帧
+
                     val outputFile = File(repairedDir, frameFile.name)
                     FileOutputStream(outputFile).use { fos ->
                         repaired.compress(Bitmap.CompressFormat.JPEG, FRAME_QUALITY, fos)
@@ -262,12 +271,49 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 带时序平滑的单帧处理
+     * prevMasks: 上一帧的蒙版区域（RectF 列表，归一化坐标）
+     * alpha: 平滑强度 0.0~1.0，值越大蒙版越稳定（闪烁越小但响应越慢）
+     * 返回：融合了历史信息的当前帧蒙版
      */
-    private suspend fun processImageWithSmoothing(
+    private fun blendMasks(
+        currentMasks: List<RectF>,
+        prevMasks: List<RectF>?,
+        alpha: Float = 0.7f
+    ): List<RectF> {
+        if (prevMasks == null || prevMasks.isEmpty()) return currentMasks
+        if (currentMasks.size != prevMasks.size) return currentMasks
+
+        // 时序平滑：蒙版边缘在历史位置和当前位置之间加权融合
+        // 效果：字幕移动时蒙版不会跳变，而是缓慢跟随 → 消除拉丝
+        return currentMasks.zip(prevMasks) { cur, prev ->
+            RectF(
+                (cur.left   * (1 - alpha) + prev.left   * alpha),
+                (cur.top    * (1 - alpha) + prev.top    * alpha),
+                (cur.right  * (1 - alpha) + prev.right  * alpha),
+                (cur.bottom * (1 - alpha) + prev.bottom * alpha)
+            )
+        }
+    }
+
+    /**
+     * 逐帧处理（带时序平滑）
+     * prevMasks: 上一帧融合后的蒙版，用于下一帧平滑
+     * 返回：处理后图片 + 融合后的蒙版（供下一帧使用）
+     */
+    private suspend fun processFrameWithSmoothing(
         bitmap: Bitmap,
-        masks: List<RectF>,
-        prevMask: Mat?
-    ): Bitmap = processImage(bitmap, masks)
+        rawMasks: List<RectF>,
+        prevMasks: List<RectF>?
+    ): Pair<Bitmap, List<RectF>> = withContext(Dispatchers.Default) {
+        // 1. 时序融合蒙版
+        val blendedMasks = blendMasks(rawMasks, prevMasks, alpha = 0.65f)
+
+        // 2. 处理当前帧
+        val repaired = processImage(bitmap, blendedMasks)
+
+        // 3. 返回结果和当前蒙版（供下一帧参考）
+        repaired to blendedMasks
+    }
 }
 
 /**
