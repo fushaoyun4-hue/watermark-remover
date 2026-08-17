@@ -331,20 +331,21 @@ fun EditorScreen(
                 val retriever = android.media.MediaMetadataRetriever()
                 retriever.setDataSource(context, Uri.parse(mediaUri))
                 val bitmap = retriever.getFrameAtTime(0)
-                retriever.release()
                 previewBitmap = bitmap
-                // 从视频元数据获取尺寸
-                try {
-                    val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                    val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                    videoWidth = wStr?.toIntOrNull() ?: (bitmap?.width ?: 1920)
-                    videoHeight = hStr?.toIntOrNull() ?: (bitmap?.height ?: 1080)
-                } catch (_: Exception) {
-                    videoWidth = bitmap?.width ?: 1920
-                    videoHeight = bitmap?.height ?: 1080
-                }
+
+                // ✅ 修复：先取元数据，再 release（之前顺序反了，release 后取值永远 null）
+                val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                retriever.release()  // 现在才 release
+
+                // 回退逻辑：优先用元数据，否则用首帧尺寸
+                videoWidth  = wStr?.toIntOrNull() ?: (bitmap?.width  ?: 1920)
+                videoHeight = hStr?.toIntOrNull() ?: (bitmap?.height ?: 1080)
+
                 if (videoWidth > 0 && videoHeight > 0) {
                     viewModel.setMediaAspectRatio(videoWidth.toFloat() / videoHeight.toFloat())
+                    // ✅ 修复：通知 ViewModel 视频像素尺寸，用于蒙版坐标归一化
+                    viewModel.setVideoPixelSize(videoWidth, videoHeight)
                 }
             } catch (e: Exception) {
                 // fallback：16:9
@@ -371,6 +372,8 @@ fun EditorScreen(
                         imageHeight = opts.outHeight
                         if (imageWidth > 0 && imageHeight > 0) {
                             viewModel.setMediaAspectRatio(imageWidth.toFloat() / imageHeight.toFloat())
+                            // ✅ 修复：图片模式下也通知 ViewModel 像素尺寸
+                            viewModel.setVideoPixelSize(imageWidth, imageHeight)
                         }
                     }
                 } catch (_: Exception) { /* ignore */ }

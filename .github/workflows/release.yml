@@ -46,13 +46,48 @@ jobs:
       - name: Create local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      # OpenCV 4.9.0 is pulled in as the official Maven Central AAR
-      # (org.opencv:opencv:4.9.0) via app/build.gradle.kts. That AAR already bundles
-      # all Java classes AND the native .so libs for every ABI, so there is NO need to
-      # download the SDK or copy java sources / jniLibs here. (Doing so previously broke
-      # the build: copying the SDK java sources made javac fail on the android package's
-      # missing R; and the Maven dependency had been commented out, so Kotlin couldn't
-      # find the classes either.)
+      # ─── AI 模型下载（ONNX，轻量 AI 图像修复）──────────────────────────────
+      # MAT 模型：专为移动端优化，效果好，~25MB（assets/mat_inpainting.onnx）
+      # 如果 assets/ 下已有模型文件，构建会直接使用；无模型时降级到 OpenCV Telea
+      - name: Download AI ONNX model (MAT)
+        id: download-model
+        run: |
+          mkdir -p app/src/main/assets
+          MODEL_FILE="mat_inpainting.onnx"
+          if [ -f "app/src/main/assets/$MODEL_FILE" ]; then
+            echo "模型已存在: $MODEL_FILE ($(du -h app/src/main/assets/$MODEL_FILE | cut -f1))"
+          else
+            echo "开始下载 ONNX AI 模型..."
+            # 尝试多个镜像源
+            URLS=(
+              "https://github.com/CS-Presence/quantized-models/releases/download/v1.0/mat_inpainting.onnx"
+              "https://huggingface.co/nicehero/mat-onnx/resolve/main/mat_inpainting.onnx"
+            )
+            for url in "${URLS[@]}"; do
+              echo "尝试: $url"
+              curl -L --retry 3 --retry-delay 5 -o "app/src/main/assets/$MODEL_FILE" \
+                -H "User-Agent: watermark-remover/1.0" \
+                --connect-timeout 30 --max-time 300 -C - \
+                -w "HTTP:%{http_code} SIZE:%{size_download}MB TIME:%{time_total}s" \
+                "$url" 2>&1
+              SIZE=$(du -m "app/src/main/assets/$MODEL_FILE" 2>/dev/null | cut -f1)
+              if [ "$SIZE" -gt 10 ]; then
+                echo "下载成功！大小: ${SIZE}MB"
+                break
+              else
+                echo "下载无效（${SIZE}MB），尝试下一个源"
+                rm -f "app/src/main/assets/$MODEL_FILE"
+              fi
+            done
+            # 最终检查
+            if [ -f "app/src/main/assets/$MODEL_FILE" ]; then
+              echo "✅ ONNX 模型就绪: $(du -h app/src/main/assets/$MODEL_FILE | cut -f1)"
+            else
+              echo "⚠️ 未找到 ONNX 模型，构建将以 OpenCV Telea 替代，AI 效果不可用"
+            fi
+          fi
+          echo "=== assets/ 目录内容 ==="
+          ls -lh app/src/main/assets/ 2>/dev/null || echo "(空目录)"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew

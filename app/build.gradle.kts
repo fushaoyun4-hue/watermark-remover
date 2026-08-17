@@ -119,14 +119,22 @@ dependencies {
     kapt("com.google.dagger:hilt-compiler:2.50")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
-    // OpenCV 4.9.0 - 官方 Maven Central AAR（org.opencv:opencv:4.9.0）
-    // 该 AAR 已内含全部 Java 类 + 4 个 ABI 的原生库(jni/arm64-v8a/libopencv_java4.so 等)，
-    // 无需再本地复制 Java 源码或 jniLibs（之前复制 SDK 源码会导致 compileReleaseJavaWithJavac 失败：
-    // android 包引用了不存在的 org.opencv.R；不复制又导致 Kotlin 找不到 OpenCV 类）。
+    // OpenCV 4.9.0 - 官方 Maven Central AAR
+    // 用于蒙版处理（创建蒙版 Mat、颜色空间转换）
     implementation("org.opencv:opencv:4.9.0")
+
+    // ONNX Runtime for Android - 轻量 AI 模型推理引擎
+    // 用于 LaMa/MAT 等图像修复模型的本地推理（模型文件随 APK 打包在 assets/）
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.3")
 
     // FFmpegKit (Full GPL - includes FFmpeg)
     implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2")
+
+    // --- AI Inpaint 模型文件（assets/ 目录，打包进 APK）---
+    // MAT 模型：IOPaint 推荐，效果好，专为移动端优化，~25MB（assets/mat_inpainting.onnx）
+    // 首次构建前需手动放置模型文件，或 CI 构建时从 GitHub Releases 下载
+    // 下载地址：https://github.com/CS-Presence/quantized-models/releases
+    // 如 assets/ 下无 .onnx 文件，构建仍成功（AI inpaint 降级为 OpenCV Telea）
 
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.5.0")

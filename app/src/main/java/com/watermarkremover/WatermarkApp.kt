@@ -16,7 +16,7 @@ class WatermarkApp : Application() {
     
     override fun onCreate() {
         super.onCreate()
-        // 静态初始化 OpenCV（org.opencv:opencv 4.x 的 Java 绑定）
+        // 静态初始化 OpenCV（用于蒙版 Mat 创建、颜色空间转换；AI 模型推理由 ONNX Runtime 处理）
         try {
             // 注意：OpenCV 4.9.0 AAR 里的 native lib 名称是 libopencv_java4.so，
             // Core.NATIVE_LIBRARY_NAME 在 4.9.0 返回 "opencv_java490"（版本号不匹配），
@@ -29,5 +29,7 @@ class WatermarkApp : Application() {
             opencvLoaded = false
         }
         // FFmpegKit 6.0+ 自动初始化，无需手动调用
+        // ONNX Runtime（com.microsoft.onnxruntime:onnxruntime-android）无需手动初始化，
+        // 模型在 OnnxInpainter 单例首次推理时按需加载（加载后缓存）
     }
 }
