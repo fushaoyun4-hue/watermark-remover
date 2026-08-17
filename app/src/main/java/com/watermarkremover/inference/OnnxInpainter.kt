@@ -79,10 +79,10 @@ class OnnxInpainter @Inject constructor(
 
             // 动态获取输入节点名（适配不同模型）
             val inputNames = session!!.inputNames
-            imageInputName = inputNames.find {
+            imageInputName = inputNames.keys.find {
                 it.lowercase().contains("image") || it == "input" || it == "x"
-            } ?: inputNames.getOrElse(0) { "input" }
-            maskInputName  = inputNames.getOrElse(1) { "mask" }
+            } ?: inputNames.keys.elementAtOrElse(0) { "input" }
+            maskInputName  = inputNames.keys.elementAtOrElse(1) { "mask" }
 
             tempFile.delete()
 
@@ -152,8 +152,11 @@ class OnnxInpainter @Inject constructor(
             val imageShape = longArrayOf(1, 3, height.toLong(), width.toLong())
             val maskShape  = longArrayOf(1, 1, height.toLong(), width.toLong())
 
-            val imageTensor = ai.onnxruntime.OnnxTensor.createTensor(ortEnv, imageData, imageShape)
-            val maskTensor  = ai.onnxruntime.OnnxTensor.createTensor(ortEnv, maskData,  maskShape)
+            val imageBuf = java.nio.FloatBuffer.wrap(imageData)
+            val maskBuf  = java.nio.FloatBuffer.wrap(maskData)
+
+            val imageTensor = ai.onnxruntime.OnnxTensor.createTensor(ortEnv, imageBuf, imageShape)
+            val maskTensor  = ai.onnxruntime.OnnxTensor.createTensor(ortEnv, maskBuf,  maskShape)
 
             // ─── 推理 ────────────────────────────────────────────────────────
             val inputs = mapOf(imageInputName to imageTensor, maskInputName to maskTensor)
@@ -163,29 +166,24 @@ class OnnxInpainter @Inject constructor(
             // ─── 后处理：Float32 NCHW → ARGB_8888 Bitmap ───────────────────
             // outputTensor.value: float[1][3][H][W]
             val outputValue = outputTensor.value
-            val channel0: Array<FloatArray>; val channel1: Array<FloatArray>; val channel2: Array<FloatArray>
-
-            when (outputValue) {
-                is Array<*> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    val arr0 = outputValue[0] as Array<*>
-                    @Suppress("UNCHECKED_CAST")
-                    channel0 = arr0[0] as Array<FloatArray>
-                    @Suppress("UNCHECKED_CAST")
-                    channel1 = arr0[1] as Array<FloatArray>
-                    @Suppress("UNCHECKED_CAST")
-                    channel2 = arr0[2] as Array<FloatArray>
-                }
-                else -> throw IllegalStateException("Unexpected output type: ${outputValue::class.java}")
-            }
+            @Suppress("UNCHECKED_CAST")
+            val outputArr = outputValue as Array<*>
+            @Suppress("UNCHECKED_CAST")
+            val ch0Any = (outputArr[0] as Array<*>)[0]
+            @Suppress("UNCHECKED_CAST")
+            val ch0 = ch0Any as Array<FloatArray>
+            @Suppress("UNCHECKED_CAST")
+            val ch1 = (outputArr[0] as Array<*>)[1] as Array<FloatArray>
+            @Suppress("UNCHECKED_CAST")
+            val ch2 = (outputArr[0] as Array<*>)[2] as Array<FloatArray>
 
             val outPixels = IntArray(width * height)
             for (y in 0 until height) {
                 for (x in 0 until width) {
                     val idx = y * width + x
-                    val r = ((channel0[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
-                    val g = ((channel1[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
-                    val b = ((channel2[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
+                    val r = ((ch0[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
+                    val g = ((ch1[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
+                    val b = ((ch2[y][x].coerceIn(-1f, 1f) + 1f) / 2f * 255f).toInt().coerceIn(0, 255)
                     outPixels[idx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                 }
             }
