@@ -89,6 +89,11 @@ class EditorViewModel @Inject constructor(
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
 
+    /** UI 拖拽缩放时更新整个区域列表，触发重组 */
+    fun updateMasks(list: List<MaskRect>) {
+        masks = list
+    }
+
     /** 正在拖拽的临时框（null = 没有在画新框） */
     var pendingMask by mutableStateOf<MaskRect?>(null)
         private set
@@ -458,7 +463,7 @@ fun EditorScreen(
                         }
                         else -> {
                             Text(
-                                text = "✅ 已框选 ${viewModel.masks.size} 个区域：空白拖动新建，边缘拖动调整大小，点击框内删除"
+                                text = "✅ 已框选 ${viewModel.masks.size} 个区域：空白拖动新建，边缘拖动调整大小，点击框内删除",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -534,10 +539,10 @@ fun EditorScreen(
                         }
                         .pointerInput(Unit) {
                             detectDragGestures(
-                                onDragStart = { startPos ->
+                                onDragStart = dragStart@{ startPos ->
                                     // 如果有待确认的框，忽略新拖拽
                                     if (viewModel.pendingMask != null) {
-                                        return@detectDragGestures
+                                        return@dragStart
                                     }
 
                                     val nx = startPos.x / canvasSize.width
@@ -560,7 +565,7 @@ fun EditorScreen(
                                                 nearTop -> "top"; nearBottom -> "bottom"
                                                 else -> ""
                                             }
-                                            return@detectDragGestures
+                                            return@dragStart
                                         }
                                     }
 
@@ -570,7 +575,7 @@ fun EditorScreen(
                                     resizeMaskId = -1
                                     resizeEdge = ""
                                 },
-                                onDrag = { change, _ ->
+                                onDrag = drag@{ change, _ ->
                                     change.consume()
                                     val pos = change.position
 
@@ -578,7 +583,7 @@ fun EditorScreen(
                                         // 缩放已有框的对应边缘
                                         val nx = pos.x / canvasSize.width
                                         val ny = pos.y / canvasSize.height
-                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@detectDragGestures
+                                        val mask = viewModel.masks.find { it.id == resizeMaskId } ?: return@drag
                                         val origL = mask.left; val origR = mask.right
                                         val origT = mask.top;   val origB = mask.bottom
                                         when (resizeEdge) {
@@ -587,7 +592,7 @@ fun EditorScreen(
                                             "top"    -> mask.top    = ny.coerceIn(0f, origB - 0.02f)
                                             "bottom" -> mask.bottom = ny.coerceIn(origT + 0.02f, 1f)
                                         }
-                                        viewModel.masks = viewModel.masks.toList()  // 触发重组
+                                        viewModel.updateMasks(viewModel.masks.toList())  // 触发重组
                                     } else if (dragMode == "new") {
                                         viewModel.updatePendingMask(EditorViewModel.MaskRect(
                                             id = -1,
