@@ -69,10 +69,13 @@ import androidx.lifecycle.viewModelScope
 
 /**
  * 编辑页：多选框 + 拖拽新建 + 点击删除已确认框 + 视频时间轴
- * 优化：
- * - 自动适应画面比例（不再硬编码 16:9/4:3）
- * - 多区域框选后需勾选确认才生效，否则可重选
- * - 视频模式支持逐帧蒙版和帧浏览时间轴
+ *
+ * 修复记录：
+ * - 问题1（全局蒙版）：蒙版从按帧存储改为全局单一列表，所有帧共享同一份蒙版，
+ *   解决"蒙版只在当前帧生效"导致的处理跳帧问题。
+ * - 问题2（进度显示）：ProcessingDialog 显示"正在处理 X/Y 帧..."真实进度，
+ *   处理完成后显示成功提示，不允许关闭弹窗直到完成。
+ * - 问题3（UI改进）：右上角添加关闭按钮，点击弹出确认对话框。
  */
 @HiltViewModel
 class EditorViewModel @Inject constructor(
@@ -170,14 +173,18 @@ class EditorViewModel @Inject constructor(
     val frameBitmaps: Map<Int, Bitmap> get() = _frameBitmaps.value
 
     // ──────────────────────────────────────────────────────────
-    //  视频帧蒙版（每帧独立的蒙版区域）
+    //  ✅ 全局蒙版（问题1核心修复）
+    //  所有帧共享同一份蒙版列表，不再按帧存储。
     // ──────────────────────────────────────────────────────────
 
-    /** 按帧索引存储的蒙版 Map（帧索引 → 该帧的蒙版列表） */
-    private val _frameMasks = MutableStateFlow<Map<Int, List<MaskRect>>>(emptyMap())
-    val frameMasks: Map<Int, List<MaskRect>> get() = _frameMasks.value
+    /** 全局蒙版列表（所有帧共用） */
+    private val _globalMasks = MutableStateFlow<List<MaskRect>>(emptyList())
+    val globalMasks: List<MaskRect> get() = _globalMasks.value
 
-    /** 兼容旧 API：用当前帧的蒙版（用于 UI 渲染） */
+    /**
+     * 兼容旧 API：`masks` 用于 UI 渲染，值始终等于全局列表。
+     * 改用 `globalMasks` 读取，`addMask / removeMask / moveMaskBy` 写操作。
+     */
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
 
@@ -202,11 +209,23 @@ class EditorViewModel @Inject constructor(
         private set
 
     /** 处理进度 0-100 */
-    var progress by mutableStateOf(0)
+    var progress by mutableIntStateOf(0)
+        private set
+
+    /** 处理帧计数（已处理帧数） */
+    var processedFrames by mutableIntStateOf(0)
+        private set
+
+    /** 处理总帧数 */
+    var totalFramesToProcess by mutableIntStateOf(0)
         private set
 
     /** 处理阶段描述（含帧索引） */
     var progressPhase by mutableStateOf("")
+        private set
+
+    /** 处理是否完成（用于显示成功提示） */
+    var processingComplete by mutableStateOf(false)
         private set
 
     /** 错误信息 */
@@ -255,13 +274,13 @@ class EditorViewModel @Inject constructor(
     }
 
     /**
-     * 切换到指定帧（会更新 currentFrameIndex 和 masks）
-     * caller 负责加载 Bitmap
+     * 切换到指定帧（会更新 currentFrameIndex）
+     * 注意：masks 不再随帧切换而变化（全局共享）
      */
     fun seekToFrame(idx: Int) {
         if (idx < 0 || totalFrames <= 0) return
         currentFrameIndex = idx.coerceIn(0, totalFrames - 1)
-        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+        // masks 始终等于全局蒙版，无需更新
     }
 
     /**
@@ -270,7 +289,6 @@ class EditorViewModel @Inject constructor(
     fun cacheFrameBitmap(idx: Int, bitmap: Bitmap) {
         _frameBitmaps.update { current ->
             val mutable = current.toMutableMap()
-            // 超过上限时移除最早的
             if (mutable.size >= MAX_FRAME_CACHE) {
                 val oldest = mutable.keys.minOrNull() ?: idx
                 mutable[oldest]?.recycle()
@@ -287,69 +305,61 @@ class EditorViewModel @Inject constructor(
     fun getCachedFrameBitmap(idx: Int): Bitmap? = _frameBitmaps.value[idx]
 
     // ──────────────────────────────────────────────────────────
-    //  蒙版操作（针对当前帧）
+    //  ✅ 蒙版操作（全局列表）
     // ──────────────────────────────────────────────────────────
 
-    fun addMaskForCurrentFrame(mask: MaskRect) {
-        _frameMasks.update { current ->
-            val list = current[currentFrameIndex]?.toMutableList() ?: mutableListOf()
-            list.add(mask)
-            current + (currentFrameIndex to list)
-        }
-        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    /**
+     * 添加蒙版到全局列表
+     */
+    fun addMask(mask: MaskRect) {
+        _globalMasks.update { it + mask }
+        masks = _globalMasks.value
     }
 
     /**
-     * 整体拖动当前帧的某个蒙版（归一化 dx/dy）。
-     * 通过重建列表 + copy 保证 Compose 重组。
+     * 整体拖动全局蒙版列表中的某个蒙版（归一化 dx/dy）。
      */
     fun moveMaskBy(id: Int, dx: Float, dy: Float) {
-        _frameMasks.update { current ->
-            val list = current[currentFrameIndex] ?: return@update current
-            val newList = list.map { m ->
+        _globalMasks.update { current ->
+            current.map { m ->
                 if (m.id != id) m
                 else m.copy(freehandPoints = m.freehandPoints?.toList()).apply { moveBy(dx, dy) }
             }
-            current + (currentFrameIndex to newList)
         }
-        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+        masks = _globalMasks.value
     }
 
-    /** 命中测试：返回当前帧最上层被点中的蒙版（手绘用多边形精确判断） */
+    /** 命中测试：返回最上层被点中的蒙版（手绘用多边形精确判断） */
     fun findMaskAt(nx: Float, ny: Float): MaskRect? = masks.findLast { it.contains(nx, ny) }
 
-    fun removeMaskForCurrentFrame(id: Int) {
-        _frameMasks.update { current ->
-            val list = current[currentFrameIndex]?.toMutableList() ?: return@update current
-            list.removeAll { it.id == id }
-            if (list.isEmpty()) current - currentFrameIndex
-            else current + (currentFrameIndex to list)
-        }
-        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    /**
+     * 从全局列表删除指定 id 的蒙版
+     */
+    fun removeMask(id: Int) {
+        _globalMasks.update { list -> list.filter { it.id != id } }
+        masks = _globalMasks.value
     }
 
-    fun getMasksForFrame(idx: Int): List<MaskArea> {
-        return (_frameMasks.value[idx] ?: emptyList()).map { mask ->
+    /**
+     * ✅ 核心修复：返回所有帧到同一份全局蒙版列表。
+     * 用于 VideoProcessor.processVideo，每帧都用相同的全局蒙版。
+     */
+    fun getAllFrameMasks(totalFrameCount: Int): Map<Int, List<MaskArea>> {
+        val globalAreas = _globalMasks.value.map { mask ->
             MaskArea(
                 rect = mask.toRectF(),
                 freehandPoints = mask.freehandPoints
             )
         }
+        // 所有帧都返回同一份全局蒙版
+        return (0 until totalFrameCount).associateWith { globalAreas }
     }
 
-    fun getAllFrameMasks(): Map<Int, List<MaskArea>> {
-        return _frameMasks.value.mapValues { (_, masks) ->
-            masks.map { mask ->
-                MaskArea(
-                    rect = mask.toRectF(),
-                    freehandPoints = mask.freehandPoints
-                )
-            }
-        }
-    }
-
+    /**
+     * 清空全局蒙版列表
+     */
     fun clearAllMasks() {
-        _frameMasks.value = emptyMap()
+        _globalMasks.value = emptyList()
         masks = emptyList()
         pendingMask = null
         pendingFreehandPoints = emptyList()
@@ -366,7 +376,9 @@ class EditorViewModel @Inject constructor(
 
     private var nextId = 0
 
-    /** 松手时将临时框转为待确认状态（不自动加入 masks） */
+    /**
+     * 松手时将临时框转为待确认状态（不自动加入 masks）
+     */
     fun confirmPendingMask() {
         val p = pendingMask ?: return
         if (p.width > 0.02f && p.height > 0.02f) {
@@ -376,7 +388,6 @@ class EditorViewModel @Inject constructor(
                 top    = minOf(p.top,  p.bottom),
                 right  = maxOf(p.left, p.right),
                 bottom = maxOf(p.top,  p.bottom),
-                // 关键修复：保留手绘轨迹，否则手绘形状会退化成矩形
                 freehandPoints = p.freehandPoints
             )
         } else {
@@ -384,7 +395,7 @@ class EditorViewModel @Inject constructor(
         }
     }
 
-    /** 用户点击勾选 → 正式加入当前帧 masks，关闭待确认 */
+    /** 用户点击勾选 → 正式加入全局蒙版，关闭待确认 */
     fun acceptPendingMask() {
         val p = pendingMask ?: return
         val accepted = MaskRect(
@@ -392,7 +403,7 @@ class EditorViewModel @Inject constructor(
             left = p.left, top = p.top, right = p.right, bottom = p.bottom,
             freehandPoints = p.freehandPoints
         )
-        addMaskForCurrentFrame(accepted)
+        addMask(accepted)
         pendingMask = null
         pendingFreehandPoints = emptyList()
     }
@@ -417,16 +428,6 @@ class EditorViewModel @Inject constructor(
     /** 清除手绘轨迹 */
     fun clearPendingFreehandPoints() {
         pendingFreehandPoints = emptyList()
-    }
-
-    /** 删除指定 id 的蒙版（当前帧） */
-    fun removeMask(id: Int) {
-        removeMaskForCurrentFrame(id)
-    }
-
-    /** 清空所有蒙版 */
-    fun clearMasks() {
-        clearAllMasks()
     }
 
     // ──────────────────────────────────────────────────────────
@@ -476,7 +477,7 @@ class EditorViewModel @Inject constructor(
             errorMessage = "请先框选水印区域"
             return
         }
-        if (mediaType == "video" && _frameMasks.value.isEmpty()) {
+        if (mediaType == "video" && _globalMasks.value.isEmpty()) {
             errorMessage = "请先在视频帧上框选水印区域"
             return
         }
@@ -484,7 +485,10 @@ class EditorViewModel @Inject constructor(
         isProcessing = true
         errorMessage = null
         progress = 0
+        processedFrames = 0
+        totalFramesToProcess = totalFrames
         progressPhase = ""
+        processingComplete = false
 
         viewModelScope.launch {
             try {
@@ -522,20 +526,35 @@ class EditorViewModel @Inject constructor(
                     result.recycle()
 
                     progress = 100
-                    onComplete(mediaUri.toString(), Uri.fromFile(outputFile).toString())
+                    processingComplete = true
+                    progressPhase = "✅ 处理完成，已保存"
+                    // 延迟关闭，让用户看到成功提示
+                    kotlinx.coroutines.delay(1500)
                     isProcessing = false
+                    onComplete(mediaUri.toString(), Uri.fromFile(outputFile).toString())
 
                 } else {
-                    // 视频：收集 per-frame 蒙版并传给 VideoProcessor
-                    val allFrameMasks = getAllFrameMasks()
+                    // ✅ 视频：使用全局蒙版（所有帧共享同一份）
+                    val totalCount = totalFrames.coerceAtLeast(1)
+                    val allFrameMasks = getAllFrameMasks(totalCount)
                     videoProcessor.processVideo(mediaUri, allFrameMasks).collectLatest { state ->
                         when (state) {
                             is VideoProcessor.ProcessState.Progress -> {
                                 progress = state.current
+                                // ✅ 解析帧计数："处理中 15/120"
+                                val match = Regex("(\\d+)/(\\d+)").find(state.phase)
+                                if (match != null) {
+                                    processedFrames = match.groupValues[1].toIntOrNull() ?: 0
+                                    totalFramesToProcess = match.groupValues[2].toIntOrNull() ?: totalCount
+                                }
                                 progressPhase = state.phase
                             }
                             is VideoProcessor.ProcessState.Success -> {
                                 progress = 100
+                                processingComplete = true
+                                progressPhase = "✅ 处理完成，已保存"
+                                // 延迟关闭，让用户看到成功提示
+                                kotlinx.coroutines.delay(1500)
                                 isProcessing = false
                                 onComplete(mediaUri.toString(), state.outputUri.toString())
                             }
@@ -586,24 +605,27 @@ fun EditorScreen(
     /** 正在整体拖动的已确认蒙版 id（null = 不在拖动蒙版） */
     var draggingMaskId by remember { mutableStateOf<Int?>(null) }
 
-    // 视频预览（首帧 or 当前帧 Bitmap）
+    /** 视频预览（首帧 or 当前帧 Bitmap） */
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    // 视频原始宽高（用于计算比例）
+    /** 视频原始宽高（用于计算比例） */
     var videoWidth by remember { mutableIntStateOf(0) }
     var videoHeight by remember { mutableIntStateOf(0) }
 
-    // 总帧数（从 retriever 获取）
+    /** 总帧数（从 retriever 获取） */
     var videoDurationMs by remember { mutableLongStateOf(0L) }
     var videoFrameRate by remember { mutableFloatStateOf(30f) }
 
-    // 图片原始宽高
+    /** 图片原始宽高 */
     var imageWidth by remember { mutableIntStateOf(0) }
     var imageHeight by remember { mutableIntStateOf(0) }
 
-    // 防抖：用于 Slider 的延迟帧加载
+    /** 防抖：用于 Slider 的延迟帧加载 */
     var pendingSeekFrame by remember { mutableIntStateOf(0) }
     var lastSeekTime by remember { mutableLongStateOf(0L) }
+
+    /** ✅ 退出确认对话框 */
+    var showExitDialog by remember { mutableStateOf(false) }
 
     val retriever = remember {
         android.media.MediaMetadataRetriever()
@@ -636,7 +658,6 @@ fun EditorScreen(
                     viewModel.setVideoPixelSize(videoWidth, videoHeight)
                 }
 
-                // 初始化帧浏览状态
                 if (frameCount > 0) {
                     viewModel.initTotalFrames(frameCount)
                     previewBitmap?.let { bmp ->
@@ -659,14 +680,12 @@ fun EditorScreen(
         lastSeekTime = now
 
         val idx = pendingSeekFrame
-        // 先从缓存读
         viewModel.getCachedFrameBitmap(idx)?.let { cached ->
             previewBitmap = cached
             viewModel.seekToFrame(idx)
             return@LaunchedEffect
         }
 
-        // 缓存未命中，用 MediaMetadataRetriever 加载
         withContext(Dispatchers.IO) {
             try {
                 val msPerFrame = if (videoFrameRate > 0) (1000000.0 / videoFrameRate).toLong() else 33333L
@@ -708,12 +727,37 @@ fun EditorScreen(
         }
     }
 
+    // ✅ 退出确认对话框（问题3）
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            title = { Text("确定退出编辑？") },
+            text = { Text("未保存的蒙版将丢失。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitDialog = false
+                    onBack()
+                }) {
+                    Text("确定退出")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
     WatermarkRemoverTheme {
-        // ---- 处理中进度弹窗 ----
+        // ✅ 处理中进度弹窗（问题2：真实进度 + 完成后显示成功提示）
         if (viewModel.isProcessing) {
             ProcessingDialog(
                 progress = viewModel.progress,
-                phase = viewModel.progressPhase
+                phase = viewModel.progressPhase,
+                processedFrames = viewModel.processedFrames,
+                totalFrames = viewModel.totalFramesToProcess,
+                isComplete = viewModel.processingComplete
             )
         }
 
@@ -722,7 +766,7 @@ fun EditorScreen(
                 TopAppBar(
                     title = { Text(if (mediaType == "video") "编辑视频" else "编辑图片") },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = { showExitDialog = true }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                         }
                     },
@@ -767,6 +811,10 @@ fun EditorScreen(
                         ) {
                             Icon(Icons.Filled.DeleteSweep, contentDescription = "清空全部")
                         }
+                        // ✅ 右上角关闭按钮（问题3）
+                        IconButton(onClick = { showExitDialog = true }) {
+                            Icon(Icons.Filled.Close, contentDescription = "关闭")
+                        }
                     }
                 )
             },
@@ -808,7 +856,7 @@ fun EditorScreen(
                         }
                         else -> {
                             Text(
-                                text = "✅ 已为第 ${viewModel.currentFrameIndex + 1} 帧圈选 ${viewModel.masks.size} 个区域",
+                                text = "✅ 已圈选 ${viewModel.masks.size} 个区域（所有帧共享）",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -825,7 +873,7 @@ fun EditorScreen(
                                 onComplete = onComplete
                             )
                         },
-                        enabled = (viewModel.masks.isNotEmpty() || viewModel.frameMasks.isNotEmpty()) && !viewModel.isProcessing,
+                        enabled = viewModel.masks.isNotEmpty() && !viewModel.isProcessing,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(56.dp),
@@ -893,7 +941,6 @@ fun EditorScreen(
                                         }
                                         return@detectTapGestures
                                     }
-                                    // 手绘蒙版用 ray-casting 精确判断，矩形用包围盒
                                     val tapped = viewModel.findMaskAt(nx, ny)
                                     if (tapped != null) viewModel.removeMask(tapped.id)
                                 }
@@ -906,7 +953,6 @@ fun EditorScreen(
                                     lastDragPos = startPos
                                     val nx = startPos.x / canvasSize.width
                                     val ny = startPos.y / canvasSize.height
-                                    // 起点落在已确认蒙版内 → 进入“整体拖动蒙版”模式
                                     val hit = viewModel.findMaskAt(nx, ny)
                                     if (hit != null) {
                                         draggingMaskId = hit.id
@@ -922,7 +968,6 @@ fun EditorScreen(
                                     change.consume()
                                     val movingId = draggingMaskId
                                     if (movingId != null) {
-                                        // 整体平移蒙版
                                         if (canvasSize.width > 0f && canvasSize.height > 0f) {
                                             viewModel.moveMaskBy(
                                                 movingId,
@@ -1000,7 +1045,7 @@ fun EditorScreen(
                         }
                     }
 
-                    // 蒙版绘制层
+                    // ✅ 全局蒙版绘制层（所有帧都显示相同的蒙版）
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val borderPx = 2.dp.toPx()
 
@@ -1043,7 +1088,6 @@ fun EditorScreen(
                             )
                             drawCircle(Color(0xFFFF9800).copy(alpha = 0.92f), radius = handleR, center = handleCenter)
                             drawCircle(Color.White, radius = handleR, center = handleCenter, style = Stroke(width = borderPx * 0.8f))
-                            // 手柄内的十字移动图标
                             val armLen = handleR * 0.5f
                             drawLine(Color.White, Offset(handleCenter.x - armLen, handleCenter.y), Offset(handleCenter.x + armLen, handleCenter.y), strokeWidth = borderPx * 0.9f)
                             drawLine(Color.White, Offset(handleCenter.x, handleCenter.y - armLen), Offset(handleCenter.x, handleCenter.y + armLen), strokeWidth = borderPx * 0.9f)
@@ -1064,7 +1108,6 @@ fun EditorScreen(
                         viewModel.pendingMask?.let { p ->
                             val pts = p.freehandPoints
                             if (pts != null && pts.size >= 3) {
-                                // 手绘待确认蒙版：只画多边形（不再画矩形包围盒，避免误导）
                                 val path = Path()
                                 path.moveTo(pts[0].first * size.width, pts[0].second * size.height)
                                 for (i in 1 until pts.size) {
@@ -1128,19 +1171,18 @@ fun EditorScreen(
                     }
                 }
 
-                // ─── 视频时间轴（仅视频模式） ───
+                // ─── ✅ 视频时间轴（问题1：所有帧都显示蒙版绿点，不再只标记有蒙版的帧） ───
                 if (mediaType == "video" && viewModel.totalFrames > 0) {
                     VideoTimeline(
                         currentFrame = viewModel.currentFrameIndex,
                         totalFrames = viewModel.totalFrames,
-                        frameMasks = viewModel.frameMasks,
+                        hasMasks = viewModel.masks.isNotEmpty(),
                         onSeek = { idx ->
                             pendingSeekFrame = idx
                             lastSeekTime = 0L
                         }
                     )
                 } else if (mediaType == "video") {
-                    // 还在加载帧数时显示占位
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1157,14 +1199,14 @@ fun EditorScreen(
 }
 
 // ──────────────────────────────────────────────────────────────
-//  视频时间轴组件
+//  ✅ 视频时间轴组件（问题1修复：所有帧显示蒙版标记）
 // ──────────────────────────────────────────────────────────────
 
 @Composable
 private fun VideoTimeline(
     currentFrame: Int,
     totalFrames: Int,
-    frameMasks: Map<Int, List<EditorViewModel.MaskRect>>,
+    hasMasks: Boolean,
     onSeek: (Int) -> Unit
 ) {
     Column(
@@ -1200,19 +1242,22 @@ private fun VideoTimeline(
                 .weight(1f),
             contentAlignment = Alignment.Center
         ) {
-            // 帧标记点（显示有蒙版的帧，绿点）
+            // ✅ 帧标记点：只要有蒙版，所有帧都显示绿点（不再是 frameMasks.keys）
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val w = size.width
                 val yCenter = size.height / 2
 
-                // 绘制帧标记点
-                frameMasks.keys.forEach { idx ->
-                    val x = (idx.toFloat() / (totalFrames - 1).coerceAtLeast(1)) * w
-                    drawCircle(
-                        color = Color(0xFF4CAF50),
-                        radius = 4.dp.toPx(),
-                        center = Offset(x, yCenter)
-                    )
+                if (hasMasks) {
+                    // 所有帧都显示绿点（蒙版是全局的，每帧都有）
+                    val step = (totalFrames - 1).coerceAtLeast(1)
+                    for (idx in 0 until totalFrames step (totalFrames / 10).coerceAtLeast(1)) {
+                        val x = (idx.toFloat() / step) * w.coerceAtLeast(1f)
+                        drawCircle(
+                            color = Color(0xFF4CAF50),
+                            radius = 4.dp.toPx(),
+                            center = Offset(x, yCenter)
+                        )
+                    }
                 }
 
                 // 橙色当前位置竖线
@@ -1249,15 +1294,21 @@ private fun VideoTimeline(
 }
 
 /**
- * 动态进度弹窗
+ * ✅ 动态进度弹窗（问题2修复：显示"正在处理 X/Y 帧..."真实进度）
+ * - 处理中：显示帧计数 + LinearProgressIndicator
+ * - 完成后：显示 ✅ 处理完成，已保存
+ * - 禁止关闭（dismissOnBackPress=false, dismissOnClickOutside=false）
  */
 @Composable
 fun ProcessingDialog(
     progress: Int,
-    phase: String
+    phase: String,
+    processedFrames: Int = 0,
+    totalFrames: Int = 0,
+    isComplete: Boolean = false
 ) {
     Dialog(
-        onDismissRequest = { /* 不允许关闭 */ },
+        onDismissRequest = { /* 禁止关闭 */ },
         properties = DialogProperties(
             dismissOnBackPress = false,
             dismissOnClickOutside = false,
@@ -1281,19 +1332,19 @@ fun ProcessingDialog(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "正在处理",
+                    text = if (isComplete) "✅ 完成" else "正在处理",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = if (isComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Text(
-                    text = "$progress%",
+                    text = if (isComplete) "100%" else "$progress%",
                     style = MaterialTheme.typography.displaySmall,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    color = if (isComplete) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1304,16 +1355,23 @@ fun ProcessingDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(10.dp),
-                    color = MaterialTheme.colorScheme.primary,
+                    color = if (isComplete) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                // ✅ 显示帧计数（问题2核心）
+                val displayPhase = if (processedFrames > 0 && totalFrames > 0 && !isComplete) {
+                    "正在处理 $processedFrames/$totalFrames 帧..."
+                } else {
+                    phase.ifEmpty { "准备中..." }
+                }
+
                 Text(
-                    text = phase.ifEmpty { "准备中..." },
+                    text = displayPhase,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isComplete) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
             }
