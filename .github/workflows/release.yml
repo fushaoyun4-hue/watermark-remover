@@ -39,7 +39,8 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          # 包含 commit SHA，确保每次 commit 用独立缓存，避免旧 .class 文件残留导致编译错误
+          key: ${{ runner.os }}-gradle-${{ github.sha }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
