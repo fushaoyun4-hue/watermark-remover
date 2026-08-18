@@ -90,7 +90,10 @@ class EditorViewModel @Inject constructor(
         var right: Float,
         var bottom: Float,
         /** 手绘轨迹的归一化坐标点（可选，用于手绘蒙版） */
-        var freehandPoints: List<Pair<Float, Float>>? = null
+        var freehandPoints: List<Pair<Float, Float>>? = null,
+        /** 累计平移量（归一化坐标），仅用于记录用户拖动历史 */
+        var offsetX: Float = 0f,
+        var offsetY: Float = 0f
     ) {
         val width  get() = kotlin.math.abs(right - left)
         val height get() = kotlin.math.abs(bottom - top)
@@ -98,6 +101,56 @@ class EditorViewModel @Inject constructor(
             minOf(left, right), minOf(top, bottom),
             maxOf(left, right), maxOf(top, bottom)
         )
+
+        /** 是否为手绘多边形蒙版 */
+        val isFreehand: Boolean get() = (freehandPoints?.size ?: 0) >= 3
+
+        /**
+         * 整体平移蒙版（归一化 dx/dy），同时平移包围盒与手绘轨迹点。
+         * 会自动夹紧到 [0,1] 画面范围内（保持形状不变形）。
+         */
+        fun moveBy(dx: Float, dy: Float) {
+            val l = minOf(left, right); val r = maxOf(left, right)
+            val t = minOf(top, bottom); val b = maxOf(top, bottom)
+            // 夹紧：不允许整体拖出画面
+            val ddx = dx.coerceIn(-l, 1f - r)
+            val ddy = dy.coerceIn(-t, 1f - b)
+            if (ddx == 0f && ddy == 0f) return
+            left += ddx; right += ddx
+            top += ddy; bottom += ddy
+            freehandPoints = freehandPoints?.map { (px, py) -> Pair(px + ddx, py + ddy) }
+            offsetX += ddx
+            offsetY += ddy
+        }
+
+        /** 命中测试：手绘用 ray-casting，矩形用包围盒 */
+        fun contains(nx: Float, ny: Float): Boolean {
+            val pts = freehandPoints
+            if (pts != null && pts.size >= 3) return pointInPolygon(nx, ny, pts)
+            val l = minOf(left, right); val r = maxOf(left, right)
+            val t = minOf(top, bottom); val b = maxOf(top, bottom)
+            return nx in l..r && ny in t..b
+        }
+
+        companion object {
+            /** Ray-casting：判断点是否在多边形内 */
+            fun pointInPolygon(nx: Float, ny: Float, polygon: List<Pair<Float, Float>>): Boolean {
+                if (polygon.size < 3) return false
+                var inside = false
+                var j = polygon.lastIndex
+                for (i in polygon.indices) {
+                    val (xi, yi) = polygon[i]
+                    val (xj, yj) = polygon[j]
+                    if (((yi > ny) != (yj > ny)) &&
+                        (nx < (xj - xi) * (ny - yi) / ((yj - yi).let { if (it == 0f) 0.0001f else it }) + xi)
+                    ) {
+                        inside = !inside
+                    }
+                    j = i
+                }
+                return inside
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────
@@ -246,6 +299,25 @@ class EditorViewModel @Inject constructor(
         masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
     }
 
+    /**
+     * 整体拖动当前帧的某个蒙版（归一化 dx/dy）。
+     * 通过重建列表 + copy 保证 Compose 重组。
+     */
+    fun moveMaskBy(id: Int, dx: Float, dy: Float) {
+        _frameMasks.update { current ->
+            val list = current[currentFrameIndex] ?: return@update current
+            val newList = list.map { m ->
+                if (m.id != id) m
+                else m.copy(freehandPoints = m.freehandPoints?.toList()).apply { moveBy(dx, dy) }
+            }
+            current + (currentFrameIndex to newList)
+        }
+        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    }
+
+    /** 命中测试：返回当前帧最上层被点中的蒙版（手绘用多边形精确判断） */
+    fun findMaskAt(nx: Float, ny: Float): MaskRect? = masks.findLast { it.contains(nx, ny) }
+
     fun removeMaskForCurrentFrame(id: Int) {
         _frameMasks.update { current ->
             val list = current[currentFrameIndex]?.toMutableList() ?: return@update current
@@ -303,7 +375,9 @@ class EditorViewModel @Inject constructor(
                 left   = minOf(p.left, p.right),
                 top    = minOf(p.top,  p.bottom),
                 right  = maxOf(p.left, p.right),
-                bottom = maxOf(p.top,  p.bottom)
+                bottom = maxOf(p.top,  p.bottom),
+                // 关键修复：保留手绘轨迹，否则手绘形状会退化成矩形
+                freehandPoints = p.freehandPoints
             )
         } else {
             pendingMask = null
@@ -337,21 +411,8 @@ class EditorViewModel @Inject constructor(
     }
 
     /** Ray-casting 算法：判断归一化坐标 (nx, ny) 是否在多边形内部 */
-    fun isInsidePolygon(nx: Float, ny: Float, polygon: List<Pair<Float, Float>>): Boolean {
-        if (polygon.size < 3) return false
-        var inside = false
-        var j = polygon.lastIndex
-        for (i in polygon.indices) {
-            val (xi, yi) = polygon[i]
-            val (xj, yj) = polygon[j]
-            if (((yi > ny) != (yj > ny)) &&
-                (nx < (xj - xi) * (ny - yi) / ((yj - yi).coerceAtLeast(0.0001f)) + xi)) {
-                inside = !inside
-            }
-            j = i
-        }
-        return inside
-    }
+    fun isInsidePolygon(nx: Float, ny: Float, polygon: List<Pair<Float, Float>>): Boolean =
+        MaskRect.pointInPolygon(nx, ny, polygon)
 
     /** 清除手绘轨迹 */
     fun clearPendingFreehandPoints() {
@@ -521,6 +582,9 @@ fun EditorScreen(
     /** 是否正在画自由曲线 */
     var isDrawingFreehand by remember { mutableStateOf(false) }
     var lastDragPos by remember { mutableStateOf(Offset.Zero) }
+
+    /** 正在整体拖动的已确认蒙版 id（null = 不在拖动蒙版） */
+    var draggingMaskId by remember { mutableStateOf<Int?>(null) }
 
     // 视频预览（首帧 or 当前帧 Bitmap）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -728,7 +792,7 @@ fun EditorScreen(
                                 text = if (mediaType == "video")
                                     "✍️ 在下方时间轴选择帧，然后在画面上手指画圈圈住水印"
                                 else
-                                    "✍️ 在画面上手指画圈圈住水印/字幕，松手自动填充，点击框内可删除",
+                                    "✍️ 手指画圈圈住水印；已确认的区域可直接拖动移位，点击区域内删除",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -829,11 +893,8 @@ fun EditorScreen(
                                         }
                                         return@detectTapGestures
                                     }
-                                    val tapped = viewModel.masks.findLast { m ->
-                                        val l = minOf(m.left, m.right); val r = maxOf(m.left, m.right)
-                                        val t = minOf(m.top, m.bottom);  val b = maxOf(m.top, m.bottom)
-                                        nx in l..r && ny in t..b
-                                    }
+                                    // 手绘蒙版用 ray-casting 精确判断，矩形用包围盒
+                                    val tapped = viewModel.findMaskAt(nx, ny)
                                     if (tapped != null) viewModel.removeMask(tapped.id)
                                 }
                             )
@@ -843,18 +904,51 @@ fun EditorScreen(
                                 onDragStart = { startPos ->
                                     if (viewModel.pendingMask != null) return@detectDragGestures
                                     lastDragPos = startPos
+                                    val nx = startPos.x / canvasSize.width
+                                    val ny = startPos.y / canvasSize.height
+                                    // 起点落在已确认蒙版内 → 进入“整体拖动蒙版”模式
+                                    val hit = viewModel.findMaskAt(nx, ny)
+                                    if (hit != null) {
+                                        draggingMaskId = hit.id
+                                        isDrawingFreehand = false
+                                        currentFreehandPoints = emptyList()
+                                        return@detectDragGestures
+                                    }
+                                    draggingMaskId = null
                                     currentFreehandPoints = listOf(startPos)
                                     isDrawingFreehand = true
                                 },
-                                onDrag = { change, _ ->
+                                onDrag = { change, dragAmount ->
                                     change.consume()
+                                    val movingId = draggingMaskId
+                                    if (movingId != null) {
+                                        // 整体平移蒙版
+                                        if (canvasSize.width > 0f && canvasSize.height > 0f) {
+                                            viewModel.moveMaskBy(
+                                                movingId,
+                                                dragAmount.x / canvasSize.width,
+                                                dragAmount.y / canvasSize.height
+                                            )
+                                        }
+                                        lastDragPos = change.position
+                                        return@detectDragGestures
+                                    }
                                     lastDragPos = change.position
                                     val pts = currentFreehandPoints.toMutableList()
                                     pts.add(change.position)
                                     currentFreehandPoints = pts
                                 },
+                                onDragCancel = {
+                                    draggingMaskId = null
+                                    isDrawingFreehand = false
+                                    currentFreehandPoints = emptyList()
+                                },
                                 onDragEnd = {
                                     isDrawingFreehand = false
+                                    if (draggingMaskId != null) {
+                                        draggingMaskId = null
+                                        return@detectDragGestures
+                                    }
                                     val pts = currentFreehandPoints
                                     currentFreehandPoints = emptyList()
                                     if (pts.size < 3) return@detectDragGestures
@@ -912,8 +1006,9 @@ fun EditorScreen(
 
                         // ---- 已确认的框 ----
                         viewModel.masks.forEach { mask ->
-                            val isFreehand = !mask.freehandPoints.isNullOrEmpty()
-                            val color = Color(0xFF00C853)
+                            val isFreehand = mask.isFreehand
+                            val isDragging = draggingMaskId == mask.id
+                            val color = if (isDragging) Color(0xFFFF9800) else Color(0xFF00C853)
 
                             if (isFreehand) {
                                 val pts = mask.freehandPoints!!
@@ -935,6 +1030,23 @@ fun EditorScreen(
                                 drawRect(color.copy(alpha = 0.22f), topLeft = Offset(l, t), size = Size(w, h))
                                 drawRect(color, topLeft = Offset(l, t), size = Size(w, h), style = Stroke(width = borderPx))
                             }
+
+                            // ---- 拖动手柄（框内右下角，橙色圆形 24dp） ----
+                            val bl = minOf(mask.left,  mask.right)  * size.width
+                            val bt = minOf(mask.top,   mask.bottom) * size.height
+                            val br = maxOf(mask.left,  mask.right)  * size.width
+                            val bb = maxOf(mask.top,   mask.bottom) * size.height
+                            val handleR = 12.dp.toPx()
+                            val handleCenter = Offset(
+                                (br - handleR - borderPx).coerceAtLeast(bl + handleR),
+                                (bb - handleR - borderPx).coerceAtLeast(bt + handleR)
+                            )
+                            drawCircle(Color(0xFFFF9800).copy(alpha = 0.92f), radius = handleR, center = handleCenter)
+                            drawCircle(Color.White, radius = handleR, center = handleCenter, style = Stroke(width = borderPx * 0.8f))
+                            // 手柄内的十字移动图标
+                            val armLen = handleR * 0.5f
+                            drawLine(Color.White, Offset(handleCenter.x - armLen, handleCenter.y), Offset(handleCenter.x + armLen, handleCenter.y), strokeWidth = borderPx * 0.9f)
+                            drawLine(Color.White, Offset(handleCenter.x, handleCenter.y - armLen), Offset(handleCenter.x, handleCenter.y + armLen), strokeWidth = borderPx * 0.9f)
                         }
 
                         // ---- 正在画的自由曲线 ----
@@ -950,17 +1062,33 @@ fun EditorScreen(
 
                         // ---- 待确认的框 ----
                         viewModel.pendingMask?.let { p ->
-                            val l = minOf(p.left,  p.right) * size.width
-                            val t = minOf(p.top,   p.bottom) * size.height
-                            val w = kotlin.math.abs(p.right - p.left) * size.width
-                            val h = kotlin.math.abs(p.bottom - p.top) * size.height
-                            drawRect(color = Color(0xFF2196F3).copy(alpha = 0.25f), topLeft = Offset(l, t), size = Size(w, h))
-                            drawRect(
-                                color = Color(0xFF2196F3),
-                                topLeft = Offset(l, t),
-                                size = Size(w, h),
-                                style = Stroke(width = borderPx, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f)))
-                            )
+                            val pts = p.freehandPoints
+                            if (pts != null && pts.size >= 3) {
+                                // 手绘待确认蒙版：只画多边形（不再画矩形包围盒，避免误导）
+                                val path = Path()
+                                path.moveTo(pts[0].first * size.width, pts[0].second * size.height)
+                                for (i in 1 until pts.size) {
+                                    path.lineTo(pts[i].first * size.width, pts[i].second * size.height)
+                                }
+                                path.close()
+                                drawPath(path, Color(0xFF2196F3).copy(alpha = 0.25f), style = Fill)
+                                drawPath(
+                                    path, Color(0xFF2196F3),
+                                    style = Stroke(width = borderPx, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f)))
+                                )
+                            } else {
+                                val l = minOf(p.left,  p.right) * size.width
+                                val t = minOf(p.top,   p.bottom) * size.height
+                                val w = kotlin.math.abs(p.right - p.left) * size.width
+                                val h = kotlin.math.abs(p.bottom - p.top) * size.height
+                                drawRect(color = Color(0xFF2196F3).copy(alpha = 0.25f), topLeft = Offset(l, t), size = Size(w, h))
+                                drawRect(
+                                    color = Color(0xFF2196F3),
+                                    topLeft = Offset(l, t),
+                                    size = Size(w, h),
+                                    style = Stroke(width = borderPx, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f)))
+                                )
+                            }
                         }
                     }
 

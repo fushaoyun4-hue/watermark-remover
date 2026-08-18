@@ -55,6 +55,15 @@ class VideoProcessor @Inject constructor(
 
         // 蒙版扩大像素数（边缘羽化，让 AI/OpenCV 有更多上下文，边界更自然）
         private const val MASK_EXPAND_PX = 6
+
+        // 边缘羽化高斯核（seamlessClone 失败时的备选方案）
+        private const val FEATHER_BLUR_PX = 8
+
+        // 帧差法阈值：像素灰度差超过此值视为「动态像素」
+        private const val MOTION_DIFF_THRESHOLD = 15.0
+
+        // 蒙版内动态像素占比超过此值 → 跳过 inpaint（避免拉丝/闪白黑）
+        private const val MOTION_SKIP_RATIO = 0.30
     }
 
     sealed class ProcessState {
@@ -91,23 +100,205 @@ class VideoProcessor @Inject constructor(
         val width  = bitmap.width
         val height = bitmap.height
 
+        // 记录原始蒙版区域（inpaint 前），供后续边缘混合使用
+        val maskBitmap = buildMaskBitmap(width, height, masks)
+
+        var inpainted: Bitmap? = null
+
         // ─── 优先：尝试 ONNX AI 模型推理 ───
         if (onnxInpainter.hasModel) {
             try {
-                val maskBitmap = buildMaskBitmap(width, height, masks)
                 val result = onnxInpainter.inpaint(bitmap, maskBitmap)
-                maskBitmap.recycle()
-                if (result !== bitmap) {
-                    return@withContext result
-                }
                 // ONNX 返回原图表示推理失败，降级到 OpenCV
+                if (result !== bitmap) inpainted = result
             } catch (_: Exception) {
                 // ONNX 推理出错，降级到 OpenCV
             }
         }
 
         // ─── Fallback：OpenCV Telea inpaint ───
-        fallbackOpenCvInpaint(bitmap, masks)
+        if (inpainted == null) {
+            inpainted = fallbackOpenCvInpaint(bitmap, masks)
+        }
+
+        // ─── 边缘混合：消除「修复区域 vs 原画面」的硬边界 ───
+        val blended = try {
+            blendEdges(bitmap, inpainted, maskBitmap, masks)
+        } catch (_: Throwable) {
+            inpainted
+        }
+        if (blended !== inpainted && inpainted !== bitmap) inpainted.recycle()
+        maskBitmap.recycle()
+
+        blended
+    }
+
+    /**
+     * 边缘混合：把 inpaint 结果与原图无缝融合，消除明显边界。
+     * 主方案：OpenCV seamlessClone（Poisson 融合，MIXED_CLONE）
+     * 备选方案：对蒙版做 FEATHER_BLUR_PX 高斯羽化后按 alpha 线性混合
+     */
+    private fun blendEdges(
+        original: Bitmap,
+        inpainted: Bitmap,
+        maskBitmap: Bitmap,
+        masks: List<MaskArea>
+    ): Bitmap {
+        if (masks.isEmpty()) return inpainted
+        val width  = original.width
+        val height = original.height
+        if (inpainted.width != width || inpainted.height != height) return inpainted
+
+        val origRgba = Mat(); Utils.bitmapToMat(original, origRgba)
+        val inpRgba  = Mat(); Utils.bitmapToMat(inpainted, inpRgba)
+        val maskRgba = Mat(); Utils.bitmapToMat(maskBitmap, maskRgba)
+
+        val dst = Mat(); Imgproc.cvtColor(origRgba, dst, Imgproc.COLOR_RGBA2BGR)
+        val src = Mat(); Imgproc.cvtColor(inpRgba,  src, Imgproc.COLOR_RGBA2BGR)
+        val maskGray = Mat(); Imgproc.cvtColor(maskRgba, maskGray, Imgproc.COLOR_RGBA2GRAY)
+        origRgba.release(); inpRgba.release(); maskRgba.release()
+
+        var out: Mat? = null
+        try {
+            // ── 主方案：逐蒙版区域 seamlessClone ──
+            var current = dst.clone()
+            var seamlessOk = false
+            for (area in masks) {
+                val bb = maskBoundingBoxPx(area, width, height) ?: continue
+                // seamlessClone 要求蒙版非零区域完整位于图像内部（留 2px 安全边）
+                if (bb.left < 2 || bb.top < 2 || bb.right > width - 3 || bb.bottom > height - 3) continue
+                if (bb.width() < 4 || bb.height() < 4) continue
+
+                val areaMask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
+                drawAreaOnMask(areaMask, area, width, height)
+                val center = org.opencv.core.Point(
+                    ((bb.left + bb.right) / 2).toDouble(),
+                    ((bb.top + bb.bottom) / 2).toDouble()
+                )
+                val res = Mat()
+                val ok = try {
+                    org.opencv.photo.Photo.seamlessClone(
+                        src, current, areaMask, center, res, org.opencv.photo.Photo.MIXED_CLONE
+                    )
+                    !res.empty()
+                } catch (_: Throwable) {
+                    false
+                }
+                areaMask.release()
+                if (ok) {
+                    current.release()
+                    current = res
+                    seamlessOk = true
+                } else {
+                    res.release()
+                }
+            }
+
+            out = if (seamlessOk) {
+                current
+            } else {
+                current.release()
+                // ── 备选：8px 高斯羽化 alpha 混合 ──
+                featherBlend(src, dst, maskGray)
+            }
+
+            val outRgba = Mat()
+            Imgproc.cvtColor(out, outRgba, Imgproc.COLOR_BGR2RGBA)
+            val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            Utils.matToBitmap(outRgba, result)
+            outRgba.release()
+            return result
+        } finally {
+            out?.release()
+            src.release(); dst.release(); maskGray.release()
+        }
+    }
+
+    /**
+     * 羽化混合：mask 做高斯模糊得到 0~1 的 alpha，result = orig*(1-a) + inpainted*a
+     * 让修复区域边界平滑过渡到原画面。
+     */
+    private fun featherBlend(src: Mat, dst: Mat, maskGray: Mat): Mat {
+        val k = FEATHER_BLUR_PX * 2 + 1
+        val blurred = Mat()
+        Imgproc.GaussianBlur(maskGray, blurred, org.opencv.core.Size(k.toDouble(), k.toDouble()), 0.0)
+
+        val alpha1 = Mat()
+        blurred.convertTo(alpha1, CvType.CV_32FC1, 1.0 / 255.0)
+        blurred.release()
+
+        val alpha3 = Mat()
+        org.opencv.core.Core.merge(listOf(alpha1, alpha1, alpha1), alpha3)
+
+        val srcF = Mat(); src.convertTo(srcF, CvType.CV_32FC3)
+        val dstF = Mat(); dst.convertTo(dstF, CvType.CV_32FC3)
+
+        val ones = Mat(alpha3.size(), alpha3.type(), Scalar(1.0, 1.0, 1.0))
+        val inv = Mat()
+        org.opencv.core.Core.subtract(ones, alpha3, inv)
+        ones.release()
+
+        val a = Mat(); org.opencv.core.Core.multiply(srcF, alpha3, a)
+        val b = Mat(); org.opencv.core.Core.multiply(dstF, inv, b)
+        val sum = Mat(); org.opencv.core.Core.add(a, b, sum)
+
+        val out = Mat()
+        sum.convertTo(out, CvType.CV_8UC3)
+
+        alpha1.release(); alpha3.release(); inv.release()
+        srcF.release(); dstF.release(); a.release(); b.release(); sum.release()
+        return out
+    }
+
+    /** 在单通道蒙版上绘制某个 MaskArea（手绘用 fillPoly，矩形用 rectangle + 扩大） */
+    private fun drawAreaOnMask(mask: Mat, area: MaskArea, width: Int, height: Int) {
+        val rect = area.rect
+        val pts = area.freehandPoints
+        if (area.isFreehand && pts != null && pts.size >= 3) {
+            val cvPts = pts.map {
+                org.opencv.core.Point(
+                    (it.first  * width).toDouble().coerceIn(0.0, (width - 1).toDouble()),
+                    (it.second * height).toDouble().coerceIn(0.0, (height - 1).toDouble())
+                )
+            }
+            val poly = org.opencv.core.MatOfPoint()
+            poly.fromList(cvPts)
+            Imgproc.fillPoly(mask, listOf(poly), Scalar(255.0))
+            poly.release()
+        } else {
+            val left   = (rect.left   * width - MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
+            val top    = (rect.top    * height - MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
+            val right  = (rect.right  * width + MASK_EXPAND_PX).toInt().coerceIn(left + 1, width - 1)
+            val bottom = (rect.bottom * height + MASK_EXPAND_PX).toInt().coerceIn(top + 1, height - 1)
+            Imgproc.rectangle(
+                mask,
+                org.opencv.core.Point(left.toDouble(), top.toDouble()),
+                org.opencv.core.Point(right.toDouble(), bottom.toDouble()),
+                Scalar(255.0), -1
+            )
+        }
+    }
+
+    /** 蒙版的像素包围盒（手绘用轨迹点包围盒） */
+    private fun maskBoundingBoxPx(area: MaskArea, width: Int, height: Int): android.graphics.Rect? {
+        val pts = area.freehandPoints
+        return if (area.isFreehand && pts != null && pts.size >= 3) {
+            val xs = pts.map { it.first * width }
+            val ys = pts.map { it.second * height }
+            android.graphics.Rect(
+                xs.min().toInt().coerceIn(0, width - 1),
+                ys.min().toInt().coerceIn(0, height - 1),
+                xs.max().toInt().coerceIn(0, width - 1),
+                ys.max().toInt().coerceIn(0, height - 1)
+            )
+        } else {
+            val r = area.rect
+            val l = (r.left * width - MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
+            val t = (r.top * height - MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
+            val rr = (r.right * width + MASK_EXPAND_PX).toInt().coerceIn(0, width - 1)
+            val bb = (r.bottom * height + MASK_EXPAND_PX).toInt().coerceIn(0, height - 1)
+            if (rr <= l || bb <= t) null else android.graphics.Rect(l, t, rr, bb)
+        }
     }
 
     /**
@@ -271,6 +462,7 @@ class VideoProcessor @Inject constructor(
             emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
 
             var prevMasks: List<MaskArea>? = null  // 上一帧融合后的蒙版
+            var prevGray: Mat? = null              // 上一帧灰度图（帧差法用）
 
             for ((idx, frameFile) in frameFiles.withIndex()) {
                 val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath,
@@ -280,9 +472,15 @@ class VideoProcessor @Inject constructor(
                     // 获取当前帧蒙版（无则用默认蒙版）
                     val rawMasks = frameMasks[idx] ?: defaultMasks
 
+                    // ── 时序一致性：帧差法检测动态区域，动态像素 > 30% 的蒙版跳过 inpaint ──
+                    val currGray = toGrayMat(bitmap)
+                    val activeMasks = filterDynamicMasks(prevGray, currGray, rawMasks, bitmap.width, bitmap.height)
+                    prevGray?.release()
+                    prevGray = currGray
+
                     // 时序平滑处理（prevMasks 会在内部自动融合并传递）
-                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, rawMasks, prevMasks)
-                    prevMasks = blendedMasks  // 保留给下一帧
+                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, activeMasks, prevMasks)
+                    prevMasks = if (activeMasks.size == rawMasks.size) blendedMasks else prevMasks  // 跳过时不污染平滑历史
 
                     val outputFile = File(repairedDir, frameFile.name)
                     FileOutputStream(outputFile).use { fos ->
@@ -295,6 +493,9 @@ class VideoProcessor @Inject constructor(
                 val progress = 5 + ((idx + 1) * 85 / totalFrames)
                 emit(ProcessState.Progress(progress.coerceIn(5, 90), 100, "处理中 ${idx + 1}/$totalFrames"))
             }
+
+            prevGray?.release()
+            prevGray = null
 
             // 阶段3：合成视频
             emit(ProcessState.Progress(92, 100, "正在合成视频..."))
@@ -364,6 +565,61 @@ class VideoProcessor @Inject constructor(
      * prevMasks: 上一帧融合后的蒙版，用于下一帧平滑
      * 返回：处理后图片 + 融合后的蒙版（供下一帧使用）
      */
+    /** Bitmap → 单通道灰度 Mat */
+    private fun toGrayMat(bitmap: Bitmap): Mat {
+        val rgba = Mat()
+        Utils.bitmapToMat(bitmap, rgba)
+        val gray = Mat()
+        Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY)
+        rgba.release()
+        return gray
+    }
+
+    /**
+     * 帧差法过滤：若某蒙版区域内的动态像素占比 >= MOTION_SKIP_RATIO，
+     * 说明有物体正穿过该区域 → 跳过该蒙版的 inpaint（保留原帧内容，避免拉丝/闪白黑）。
+     */
+    private fun filterDynamicMasks(
+        prevGray: Mat?,
+        currGray: Mat,
+        masks: List<MaskArea>,
+        width: Int,
+        height: Int
+    ): List<MaskArea> {
+        if (prevGray == null || masks.isEmpty()) return masks
+        if (prevGray.size() != currGray.size()) return masks
+
+        val diff = Mat()
+        try {
+            org.opencv.core.Core.absdiff(prevGray, currGray, diff)
+            Imgproc.threshold(diff, diff, MOTION_DIFF_THRESHOLD, 255.0, Imgproc.THRESH_BINARY)
+
+            return masks.filter { area ->
+                val areaMask = Mat(height, width, CvType.CV_8UC1, Scalar(0.0))
+                try {
+                    drawAreaOnMask(areaMask, area, width, height)
+                    val maskPixels = org.opencv.core.Core.countNonZero(areaMask)
+                    if (maskPixels <= 0) return@filter true
+                    val motion = Mat()
+                    org.opencv.core.Core.bitwise_and(diff, diff, motion, areaMask)
+                    val motionPixels = org.opencv.core.Core.countNonZero(motion)
+                    motion.release()
+                    val ratio = motionPixels.toDouble() / maskPixels.toDouble()
+                    // 动态程度 < 30% 才 inpaint
+                    ratio < MOTION_SKIP_RATIO
+                } catch (_: Throwable) {
+                    true
+                } finally {
+                    areaMask.release()
+                }
+            }
+        } catch (_: Throwable) {
+            return masks
+        } finally {
+            diff.release()
+        }
+    }
+
     private suspend fun processFrameWithSmoothing(
         bitmap: Bitmap,
         rawMasks: List<MaskArea>,
