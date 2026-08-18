@@ -9,6 +9,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,11 +31,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -47,13 +47,18 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.watermarkremover.inference.VideoProcessor
+import com.watermarkremover.inference.VideoProcessor.MaskArea
 import com.watermarkremover.ui.theme.WatermarkRemoverTheme
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -63,15 +68,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 
 /**
- * 编辑页：多选框 + 拖拽新建 + 点击删除已确认框
+ * 编辑页：多选框 + 拖拽新建 + 点击删除已确认框 + 视频时间轴
  * 优化：
  * - 自动适应画面比例（不再硬编码 16:9/4:3）
  * - 多区域框选后需勾选确认才生效，否则可重选
+ * - 视频模式支持逐帧蒙版和帧浏览时间轴
  */
 @HiltViewModel
 class EditorViewModel @Inject constructor(
     private val videoProcessor: VideoProcessor
 ) : ViewModel() {
+
+    companion object {
+        private const val MAX_FRAME_CACHE = 10
+    }
 
     data class MaskRect(
         val id: Int,
@@ -84,20 +94,43 @@ class EditorViewModel @Inject constructor(
     ) {
         val width  get() = kotlin.math.abs(right - left)
         val height get() = kotlin.math.abs(bottom - top)
-        fun toRectF() = android.graphics.RectF(
+        fun toRectF() = RectF(
             minOf(left, right), minOf(top, bottom),
             maxOf(left, right), maxOf(top, bottom)
         )
     }
 
-    /** 已确认的水印区域列表 */
+    // ──────────────────────────────────────────────────────────
+    //  视频帧浏览状态
+    // ──────────────────────────────────────────────────────────
+
+    /** 当前选中的帧索引（从 0 开始） */
+    var currentFrameIndex by mutableIntStateOf(0)
+        private set
+
+    /** 视频总帧数（从 FFmpegKit 抽帧后可知） */
+    var totalFrames by mutableIntStateOf(0)
+        private set
+
+    /** 已加载帧的 Bitmap 缓存（LRU，最多 MAX_FRAME_CACHE 帧） */
+    private val _frameBitmaps = MutableStateFlow<Map<Int, Bitmap>>(emptyMap())
+    val frameBitmaps: Map<Int, Bitmap> get() = _frameBitmaps.value
+
+    // ──────────────────────────────────────────────────────────
+    //  视频帧蒙版（每帧独立的蒙版区域）
+    // ──────────────────────────────────────────────────────────
+
+    /** 按帧索引存储的蒙版 Map（帧索引 → 该帧的蒙版列表） */
+    private val _frameMasks = MutableStateFlow<Map<Int, List<MaskRect>>>(emptyMap())
+    val frameMasks: Map<Int, List<MaskRect>> get() = _frameMasks.value
+
+    /** 兼容旧 API：用当前帧的蒙版（用于 UI 渲染） */
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
 
-    /** UI 拖拽缩放时更新整个区域列表，触发重组 */
-    fun updateMasks(list: List<MaskRect>) {
-        masks = list
-    }
+    // ──────────────────────────────────────────────────────────
+    //  待确认框（仍在当前帧）
+    // ──────────────────────────────────────────────────────────
 
     /** 正在拖拽的临时框（null = 没有在画新框） */
     var pendingMask by mutableStateOf<MaskRect?>(null)
@@ -107,6 +140,10 @@ class EditorViewModel @Inject constructor(
     var pendingFreehandPoints by mutableStateOf<List<Pair<Float, Float>>>(emptyList())
         private set
 
+    // ──────────────────────────────────────────────────────────
+    //  处理状态
+    // ──────────────────────────────────────────────────────────
+
     /** 是否正在处理中 */
     var isProcessing by mutableStateOf(false)
         private set
@@ -115,7 +152,7 @@ class EditorViewModel @Inject constructor(
     var progress by mutableStateOf(0)
         private set
 
-    /** 处理阶段描述 */
+    /** 处理阶段描述（含帧索引） */
     var progressPhase by mutableStateOf("")
         private set
 
@@ -123,16 +160,16 @@ class EditorViewModel @Inject constructor(
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
-    fun setMediaAspectRatio(ratio: Float) {
-        mediaAspectRatio = ratio
-    }
+    // ──────────────────────────────────────────────────────────
+    //  媒体信息
+    // ──────────────────────────────────────────────────────────
 
     /** 媒体原始宽高比（宽/高），用于画面自适应 */
     var mediaAspectRatio by mutableStateOf<Float?>(null)
         private set
 
     /** Canvas 尺寸（像素），由 UI 层设置 */
-    var canvasSize by mutableStateOf<androidx.compose.ui.geometry.Size?>(null)
+    var canvasSize by mutableStateOf<Size?>(null)
         private set
 
     /** 视频在 Canvas 中的实际显示区域（像素坐标，相对于 Canvas 左上角） */
@@ -143,8 +180,12 @@ class EditorViewModel @Inject constructor(
     var videoPixelSize by mutableStateOf<Pair<Int, Int>?>(null)
         private set
 
+    fun setMediaAspectRatio(ratio: Float) {
+        mediaAspectRatio = ratio
+    }
+
     fun setVideoDisplayRectAndCanvasSize(canvasW: Float, canvasH: Float, displayRect: Rect) {
-        canvasSize = androidx.compose.ui.geometry.Size(canvasW, canvasH)
+        canvasSize = Size(canvasW, canvasH)
         videoDisplayRect = displayRect
     }
 
@@ -152,13 +193,111 @@ class EditorViewModel @Inject constructor(
         videoPixelSize = width to height
     }
 
+    // ──────────────────────────────────────────────────────────
+    //  帧导航方法
+    // ──────────────────────────────────────────────────────────
+
+    fun initTotalFrames(n: Int) {
+        totalFrames = n
+    }
+
+    /**
+     * 切换到指定帧（会更新 currentFrameIndex 和 masks）
+     * caller 负责加载 Bitmap
+     */
+    fun seekToFrame(idx: Int) {
+        if (idx < 0 || totalFrames <= 0) return
+        currentFrameIndex = idx.coerceIn(0, totalFrames - 1)
+        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    }
+
+    /**
+     * 缓存帧 Bitmap（LRU，超过 MAX_FRAME_CACHE 时移除最旧的）
+     */
+    fun cacheFrameBitmap(idx: Int, bitmap: Bitmap) {
+        _frameBitmaps.update { current ->
+            val mutable = current.toMutableMap()
+            // 超过上限时移除最早的
+            if (mutable.size >= MAX_FRAME_CACHE) {
+                val oldest = mutable.keys.minOrNull() ?: idx
+                mutable[oldest]?.recycle()
+                mutable.remove(oldest)
+            }
+            mutable[idx] = bitmap
+            mutable.toMap()
+        }
+    }
+
+    /**
+     * 获取缓存的帧 Bitmap
+     */
+    fun getCachedFrameBitmap(idx: Int): Bitmap? = _frameBitmaps.value[idx]
+
+    // ──────────────────────────────────────────────────────────
+    //  蒙版操作（针对当前帧）
+    // ──────────────────────────────────────────────────────────
+
+    fun addMaskForCurrentFrame(mask: MaskRect) {
+        _frameMasks.update { current ->
+            val list = current[currentFrameIndex]?.toMutableList() ?: mutableListOf()
+            list.add(mask)
+            current + (currentFrameIndex to list)
+        }
+        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    }
+
+    fun removeMaskForCurrentFrame(id: Int) {
+        _frameMasks.update { current ->
+            val list = current[currentFrameIndex]?.toMutableList() ?: return@update current
+            list.removeAll { it.id == id }
+            if (list.isEmpty()) current - currentFrameIndex
+            else current + (currentFrameIndex to list)
+        }
+        masks = _frameMasks.value[currentFrameIndex] ?: emptyList()
+    }
+
+    fun getMasksForFrame(idx: Int): List<MaskArea> {
+        return (_frameMasks.value[idx] ?: emptyList()).map { mask ->
+            MaskArea(
+                rect = mask.toRectF(),
+                freehandPoints = mask.freehandPoints
+            )
+        }
+    }
+
+    fun getAllFrameMasks(): Map<Int, List<MaskArea>> {
+        return _frameMasks.value.mapValues { (_, masks) ->
+            masks.map { mask ->
+                MaskArea(
+                    rect = mask.toRectF(),
+                    freehandPoints = mask.freehandPoints
+                )
+            }
+        }
+    }
+
+    fun clearAllMasks() {
+        _frameMasks.value = emptyMap()
+        masks = emptyList()
+        pendingMask = null
+        pendingFreehandPoints = emptyList()
+    }
+
+    fun clearFrameBitmapCache() {
+        _frameBitmaps.value.values.forEach { it.recycle() }
+        _frameBitmaps.value = emptyMap()
+    }
+
+    // ──────────────────────────────────────────────────────────
+    //  待确认框操作
+    // ──────────────────────────────────────────────────────────
+
     private var nextId = 0
 
     /** 松手时将临时框转为待确认状态（不自动加入 masks） */
     fun confirmPendingMask() {
         val p = pendingMask ?: return
         if (p.width > 0.02f && p.height > 0.02f) {
-            // 不直接加入 masks，保持在 pendingMask，等待用户勾选确认
             pendingMask = MaskRect(
                 id = nextId++,
                 left   = minOf(p.left, p.right),
@@ -171,7 +310,7 @@ class EditorViewModel @Inject constructor(
         }
     }
 
-    /** 用户点击勾选 → 正式加入 masks，关闭待确认 */
+    /** 用户点击勾选 → 正式加入当前帧 masks，关闭待确认 */
     fun acceptPendingMask() {
         val p = pendingMask ?: return
         val accepted = MaskRect(
@@ -179,7 +318,7 @@ class EditorViewModel @Inject constructor(
             left = p.left, top = p.top, right = p.right, bottom = p.bottom,
             freehandPoints = p.freehandPoints
         )
-        masks = masks + accepted
+        addMaskForCurrentFrame(accepted)
         pendingMask = null
         pendingFreehandPoints = emptyList()
     }
@@ -219,39 +358,27 @@ class EditorViewModel @Inject constructor(
         pendingFreehandPoints = emptyList()
     }
 
+    /** 删除指定 id 的蒙版（当前帧） */
     fun removeMask(id: Int) {
-        masks = masks.filter { it.id != id }
+        removeMaskForCurrentFrame(id)
     }
 
+    /** 清空所有蒙版 */
     fun clearMasks() {
-        masks = emptyList()
-        pendingMask = null
-        pendingFreehandPoints = emptyList()
+        clearAllMasks()
     }
 
-    fun startProcessing(
-        context: android.content.Context,
-        mediaUri: Uri,
-        mediaType: String,
-        onComplete: (String, String) -> Unit
-    ) {
-        if (masks.isEmpty()) {
-            errorMessage = "请先框选水印区域"
-            return
-        }
+    // ──────────────────────────────────────────────────────────
+    //  坐标归一化：将 Canvas 蒙版转为视频像素坐标系
+    // ──────────────────────────────────────────────────────────
 
-        isProcessing = true
-        errorMessage = null
-        progress = 0
-        progressPhase = ""
-
-        // 将 Canvas 坐标系(0~1) 的蒙版转换为视频像素坐标系(0~1)
-        val displayRect = videoDisplayRect
-        val pixelSize = videoPixelSize
-        val cs = canvasSize
-        val androidMasks = masks.map { mask ->
-            val raw = mask.toRectF()
-            val normed = if (displayRect != null && pixelSize != null && cs != null && mediaType == "video") {
+    private fun MaskRect.toNormedMaskArea(mediaType: String): MaskArea {
+        val raw = this.toRectF()
+        val normed = if (mediaType == "video") {
+            val displayRect = videoDisplayRect
+            val pixelSize = videoPixelSize
+            val cs = canvasSize
+            if (displayRect != null && pixelSize != null && cs != null) {
                 val canvasL = raw.left * cs.width
                 val canvasT = raw.top * cs.height
                 val canvasR = raw.right * cs.width
@@ -267,15 +394,42 @@ class EditorViewModel @Inject constructor(
                     vidB / displayRect.height
                 )
             } else raw
-            VideoProcessor.MaskArea(
-                rect = normed,
-                freehandPoints = mask.freehandPoints
-            )
+        } else raw
+        return MaskArea(
+            rect = normed,
+            freehandPoints = this.freehandPoints
+        )
+    }
+
+    // ──────────────────────────────────────────────────────────
+    //  开始处理
+    // ──────────────────────────────────────────────────────────
+
+    fun startProcessing(
+        context: android.content.Context,
+        mediaUri: Uri,
+        mediaType: String,
+        onComplete: (String, String) -> Unit
+    ) {
+        if (mediaType == "image" && masks.isEmpty()) {
+            errorMessage = "请先框选水印区域"
+            return
         }
+        if (mediaType == "video" && _frameMasks.value.isEmpty()) {
+            errorMessage = "请先在视频帧上框选水印区域"
+            return
+        }
+
+        isProcessing = true
+        errorMessage = null
+        progress = 0
+        progressPhase = ""
 
         viewModelScope.launch {
             try {
                 if (mediaType == "image") {
+                    val androidMasks = masks.map { it.toNormedMaskArea("image") }
+
                     val bitmap = withContext(Dispatchers.IO) {
                         context.contentResolver.openInputStream(mediaUri)?.use { inputStream ->
                             BitmapFactory.decodeStream(inputStream)
@@ -311,7 +465,9 @@ class EditorViewModel @Inject constructor(
                     isProcessing = false
 
                 } else {
-                    videoProcessor.processVideo(mediaUri, androidMasks).collectLatest { state ->
+                    // 视频：收集 per-frame 蒙版并传给 VideoProcessor
+                    val allFrameMasks = getAllFrameMasks()
+                    videoProcessor.processVideo(mediaUri, allFrameMasks).collectLatest { state ->
                         when (state) {
                             is VideoProcessor.ProcessState.Progress -> {
                                 progress = state.current
@@ -334,6 +490,11 @@ class EditorViewModel @Inject constructor(
                 isProcessing = false
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        clearFrameBitmapCache()
     }
 }
 
@@ -361,54 +522,109 @@ fun EditorScreen(
     var isDrawingFreehand by remember { mutableStateOf(false) }
     var lastDragPos by remember { mutableStateOf(Offset.Zero) }
 
-    // 视频预览（首帧）
+    // 视频预览（首帧 or 当前帧 Bitmap）
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     // 视频原始宽高（用于计算比例）
     var videoWidth by remember { mutableIntStateOf(0) }
     var videoHeight by remember { mutableIntStateOf(0) }
 
+    // 总帧数（从 retriever 获取）
+    var videoDurationMs by remember { mutableLongStateOf(0L) }
+    var videoFrameRate by remember { mutableFloatStateOf(30f) }
+
     // 图片原始宽高
     var imageWidth by remember { mutableIntStateOf(0) }
     var imageHeight by remember { mutableIntStateOf(0) }
+
+    // 防抖：用于 Slider 的延迟帧加载
+    var pendingSeekFrame by remember { mutableIntStateOf(0) }
+    var lastSeekTime by remember { mutableLongStateOf(0L) }
+
+    val retriever = remember {
+        android.media.MediaMetadataRetriever()
+    }
 
     // 获取媒体尺寸
     LaunchedEffect(mediaUri) {
         if (mediaType == "video") {
             try {
-                val retriever = android.media.MediaMetadataRetriever()
                 retriever.setDataSource(context, Uri.parse(mediaUri))
-                val bitmap = retriever.getFrameAtTime(0)
-                previewBitmap = bitmap
 
-                // ✅ 修复：先取元数据，再 release（之前顺序反了，release 后取值永远 null）
                 val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
                 val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                retriever.release()  // 现在才 release
+                val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                val fpsStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
 
-                // 回退逻辑：优先用元数据，否则用首帧尺寸
-                videoWidth  = wStr?.toIntOrNull() ?: (bitmap?.width  ?: 1920)
-                videoHeight = hStr?.toIntOrNull() ?: (bitmap?.height ?: 1080)
+                videoWidth  = wStr?.toIntOrNull() ?: 1920
+                videoHeight = hStr?.toIntOrNull() ?: 1080
+                videoDurationMs = durStr?.toLongOrNull() ?: 0L
+                videoFrameRate = fpsStr?.toFloatOrNull() ?: 30f
+
+                val frameCount = if (videoDurationMs > 0 && videoFrameRate > 0) {
+                    ((videoDurationMs / 1000.0) * videoFrameRate).toInt()
+                } else 0
+
+                previewBitmap = retriever.getFrameAtTime(0)
 
                 if (videoWidth > 0 && videoHeight > 0) {
                     viewModel.setMediaAspectRatio(videoWidth.toFloat() / videoHeight.toFloat())
-                    // ✅ 修复：通知 ViewModel 视频像素尺寸，用于蒙版坐标归一化
                     viewModel.setVideoPixelSize(videoWidth, videoHeight)
                 }
+
+                // 初始化帧浏览状态
+                if (frameCount > 0) {
+                    viewModel.initTotalFrames(frameCount)
+                    previewBitmap?.let { bmp ->
+                        viewModel.cacheFrameBitmap(0, bmp.copy(Bitmap.Config.ARGB_8888, false))
+                    }
+                }
             } catch (e: Exception) {
-                // fallback：16:9
                 viewModel.setMediaAspectRatio(16f / 9f)
             }
         } else {
-            // 图片：从 AsyncImage 加载时无法直接获取尺寸，用 PlaceHolder 方案
-            // 先用 4:3 作为 fallback，图片加载后更新
             viewModel.setMediaAspectRatio(4f / 3f)
         }
     }
 
-    // 图片加载完成后获取实际尺寸
-    var loadedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    // 加载指定帧（防抖）
+    LaunchedEffect(pendingSeekFrame, mediaUri) {
+        if (mediaType != "video") return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        if (now - lastSeekTime < 100) return@LaunchedEffect
+        lastSeekTime = now
 
+        val idx = pendingSeekFrame
+        // 先从缓存读
+        viewModel.getCachedFrameBitmap(idx)?.let { cached ->
+            previewBitmap = cached
+            viewModel.seekToFrame(idx)
+            return@LaunchedEffect
+        }
+
+        // 缓存未命中，用 MediaMetadataRetriever 加载
+        withContext(Dispatchers.IO) {
+            try {
+                val msPerFrame = if (videoFrameRate > 0) (1000000.0 / videoFrameRate).toLong() else 33333L
+                val timeUs = idx * msPerFrame * 1000L
+                val bmp = retriever.getFrameAtTime(timeUs.coerceAtLeast(0L))
+                if (bmp != null) {
+                    previewBitmap = bmp
+                    viewModel.cacheFrameBitmap(idx, bmp.copy(Bitmap.Config.ARGB_8888, false))
+                    viewModel.seekToFrame(idx)
+                }
+            } catch (_: Exception) { /* ignore */ }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            retriever.release()
+            viewModel.clearFrameBitmapCache()
+        }
+    }
+
+    // 图片加载完成后获取实际尺寸
     LaunchedEffect(mediaUri) {
         if (mediaType == "image") {
             withContext(Dispatchers.IO) {
@@ -420,7 +636,6 @@ fun EditorScreen(
                         imageHeight = opts.outHeight
                         if (imageWidth > 0 && imageHeight > 0) {
                             viewModel.setMediaAspectRatio(imageWidth.toFloat() / imageHeight.toFloat())
-                            // ✅ 修复：图片模式下也通知 ViewModel 像素尺寸
                             viewModel.setVideoPixelSize(imageWidth, imageHeight)
                         }
                     }
@@ -448,6 +663,30 @@ fun EditorScreen(
                         }
                     },
                     actions = {
+                        if (mediaType == "video") {
+                            // 跳转到上一帧
+                            IconButton(
+                                onClick = {
+                                    val prev = (viewModel.currentFrameIndex - 1).coerceAtLeast(0)
+                                    pendingSeekFrame = prev
+                                    lastSeekTime = 0L
+                                },
+                                enabled = viewModel.currentFrameIndex > 0
+                            ) {
+                                Text("◀", fontSize = 18.sp)
+                            }
+                            // 跳转到下一帧
+                            IconButton(
+                                onClick = {
+                                    val next = (viewModel.currentFrameIndex + 1).coerceAtMost((viewModel.totalFrames - 1).coerceAtLeast(0))
+                                    pendingSeekFrame = next
+                                    lastSeekTime = 0L
+                                },
+                                enabled = viewModel.currentFrameIndex < viewModel.totalFrames - 1
+                            ) {
+                                Text("▶", fontSize = 18.sp)
+                            }
+                        }
                         IconButton(
                             onClick = {
                                 if (viewModel.masks.isNotEmpty()) {
@@ -472,7 +711,7 @@ fun EditorScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
-                        .navigationBarsPadding()  // 避免被系统导航栏遮挡
+                        .navigationBarsPadding()
                 ) {
                     viewModel.errorMessage?.let { msg ->
                         Text(
@@ -486,7 +725,10 @@ fun EditorScreen(
                     when {
                         viewModel.masks.isEmpty() && viewModel.pendingMask == null -> {
                             Text(
-                                text = "✍️ 在画面上手指画圈圈住水印/字幕，松手自动填充，点击框内可删除",
+                                text = if (mediaType == "video")
+                                    "✍️ 在下方时间轴选择帧，然后在画面上手指画圈圈住水印"
+                                else
+                                    "✍️ 在画面上手指画圈圈住水印/字幕，松手自动填充，点击框内可删除",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -502,7 +744,7 @@ fun EditorScreen(
                         }
                         else -> {
                             Text(
-                                text = "✅ 已圈选 ${viewModel.masks.size} 个区域：空白处画圈新增，点击框内删除",
+                                text = "✅ 已为第 ${viewModel.currentFrameIndex + 1} 帧圈选 ${viewModel.masks.size} 个区域",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -519,7 +761,7 @@ fun EditorScreen(
                                 onComplete = onComplete
                             )
                         },
-                        enabled = viewModel.masks.isNotEmpty() && !viewModel.isProcessing,
+                        enabled = (viewModel.masks.isNotEmpty() || viewModel.frameMasks.isNotEmpty()) && !viewModel.isProcessing,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(56.dp),
@@ -530,41 +772,38 @@ fun EditorScreen(
                 }
             }
         ) { padding ->
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center
+                    .background(Color.Black)
+                    .navigationBarsPadding(),
+                verticalArrangement = Arrangement.Top
             ) {
-                // 限制媒体区域高度，留出操作区空间
+                // ─── 媒体预览区（占 60%） ───
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .fillMaxHeight(0.75f)  // 最多占 75% 高度，留空间给底部按钮
+                        .weight(0.60f)
+                        .padding(8.dp)
                         .then(
-                            // 如果已有实际比例，用实际比例；否则填满
                             if (viewModel.mediaAspectRatio != null && viewModel.mediaAspectRatio!! > 0) {
                                 Modifier.aspectRatio(viewModel.mediaAspectRatio!!)
                             } else {
                                 Modifier
                             }
                         )
-                        .padding(8.dp)
                         .onSizeChanged { size ->
                             val canvasW = size.width.toFloat()
                             val canvasH = size.height.toFloat()
                             canvasSize = Size(canvasW, canvasH)
-                            // 计算视频在 Canvas 中的实际显示区域（考虑 letterbox / pillarbox）
                             val ratio = viewModel.mediaAspectRatio ?: (16f / 9f)
                             val boxRatio = canvasW / canvasH
                             val (vidW, vidH) = if (boxRatio > ratio) {
-                                // 左右有黑边（视频比 Canvas 更瘦长）
                                 val h = canvasH
                                 val w = h * ratio
                                 w.toFloat() to h.toFloat()
                             } else {
-                                // 上下有黑边（视频比 Canvas 更扁宽）
                                 val w = canvasW
                                 val h = w / ratio
                                 w.toFloat() to h.toFloat()
@@ -655,7 +894,7 @@ fun EditorScreen(
                         previewBitmap?.let { bitmap ->
                             androidx.compose.foundation.Image(
                                 bitmap = bitmap.asImageBitmap(),
-                                contentDescription = "视频预览",
+                                contentDescription = "视频帧 ${viewModel.currentFrameIndex + 1}",
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Fit
                             )
@@ -663,7 +902,7 @@ fun EditorScreen(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("视频预览加载中...", color = Color.White)
+                            Text("视频帧加载中...", color = Color.White)
                         }
                     }
 
@@ -671,13 +910,12 @@ fun EditorScreen(
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val borderPx = 2.dp.toPx()
 
-                                        // ---- 已确认的框：绿色边框（手绘显示为路径，矩形显示为矩形）----
+                        // ---- 已确认的框 ----
                         viewModel.masks.forEach { mask ->
                             val isFreehand = !mask.freehandPoints.isNullOrEmpty()
                             val color = Color(0xFF00C853)
 
                             if (isFreehand) {
-                                // 手绘：绘制封闭 Path
                                 val pts = mask.freehandPoints!!
                                 if (pts.size >= 3) {
                                     val path = Path()
@@ -690,7 +928,6 @@ fun EditorScreen(
                                     drawPath(path, color, style = Stroke(width = borderPx))
                                 }
                             } else {
-                                // 矩形
                                 val l = minOf(mask.left,  mask.right)  * size.width
                                 val t = minOf(mask.top,   mask.bottom) * size.height
                                 val w = kotlin.math.abs(mask.right - mask.left) * size.width
@@ -700,103 +937,185 @@ fun EditorScreen(
                             }
                         }
 
-                        // ---- 正在画的自由曲线：蓝色半透明填充 + 虚线边框 ----
+                        // ---- 正在画的自由曲线 ----
                         if (currentFreehandPoints.isNotEmpty()) {
                             val path = Path()
                             path.moveTo(currentFreehandPoints[0].x, currentFreehandPoints[0].y)
                             for (i in 1 until currentFreehandPoints.size) {
                                 path.lineTo(currentFreehandPoints[i].x, currentFreehandPoints[i].y)
                             }
-                            // 填充已围成区域
-                            drawPath(
-                                path = path,
-                                color = Color(0xFF2196F3).copy(alpha = 0.3f),
-                                style = Fill
-                            )
-                            // 蓝色实线描边
-                            drawPath(
-                                path = path,
-                                color = Color(0xFF2196F3),
-                                style = Stroke(width = borderPx * 1.5f)
-                            )
+                            drawPath(path = path, color = Color(0xFF2196F3).copy(alpha = 0.3f), style = Fill)
+                            drawPath(path = path, color = Color(0xFF2196F3), style = Stroke(width = borderPx * 1.5f))
                         }
 
-                        // ---- 待确认的框：蓝色虚线 ----
+                        // ---- 待确认的框 ----
                         viewModel.pendingMask?.let { p ->
                             val l = minOf(p.left,  p.right) * size.width
                             val t = minOf(p.top,   p.bottom) * size.height
                             val w = kotlin.math.abs(p.right - p.left) * size.width
                             val h = kotlin.math.abs(p.bottom - p.top) * size.height
-
-                            // 半透明蓝色填充
-                            drawRect(
-                                color = Color(0xFF2196F3).copy(alpha = 0.25f),
-                                topLeft = Offset(l, t),
-                                size = Size(w, h)
-                            )
-                            // 蓝色虚线边框
+                            drawRect(color = Color(0xFF2196F3).copy(alpha = 0.25f), topLeft = Offset(l, t), size = Size(w, h))
                             drawRect(
                                 color = Color(0xFF2196F3),
                                 topLeft = Offset(l, t),
                                 size = Size(w, h),
-                                style = Stroke(
-                                    width = borderPx,
-                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
-                                )
+                                style = Stroke(width = borderPx, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f)))
                             )
                         }
                     }
 
-                    // ---- 待确认框顶部左右角的勾叉按钮 ----
+                    // ---- 待确认框顶部勾叉按钮 ----
                     viewModel.pendingMask?.let { p ->
-                        BoxWithConstraints(
-                            modifier = Modifier.fillMaxSize()
-                        ) {
+                        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                             val boxW = constraints.maxWidth
                             val boxH = constraints.maxHeight
                             val l = (minOf(p.left, p.right) * boxW).toInt()
                             val t = (minOf(p.top, p.bottom) * boxH).toInt()
                             val w = (kotlin.math.abs(p.right - p.left) * boxW).toInt()
 
-                            // 绿色勾选按钮（框外顶部右侧）
                             Box(
                                 modifier = Modifier
                                     .size(36.dp)
-                                    .offset { IntOffset(l + w - 36, t - 40) }  // 框外顶部右侧
+                                    .offset { IntOffset(l + w - 36, t - 40) }
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFF00C853))
                                     .clickable { viewModel.acceptPendingMask() },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "✓",
-                                    color = Color.White,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Text(text = "✓", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             }
 
-                            // 红色叉号按钮（框外顶部左侧）
                             Box(
                                 modifier = Modifier
                                     .size(36.dp)
-                                    .offset { IntOffset(l, t - 40) }  // 框外顶部左侧
+                                    .offset { IntOffset(l, t - 40) }
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFFFF5252))
                                     .clickable { viewModel.rejectPendingMask() },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "✕",
-                                    color = Color.White,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Text(text = "✕", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
                 }
+
+                // ─── 视频时间轴（仅视频模式） ───
+                if (mediaType == "video" && viewModel.totalFrames > 0) {
+                    VideoTimeline(
+                        currentFrame = viewModel.currentFrameIndex,
+                        totalFrames = viewModel.totalFrames,
+                        frameMasks = viewModel.frameMasks,
+                        onSeek = { idx ->
+                            pendingSeekFrame = idx
+                            lastSeekTime = 0L
+                        }
+                    )
+                } else if (mediaType == "video") {
+                    // 还在加载帧数时显示占位
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(80.dp)
+                            .padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("正在检测视频帧数...", color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp)
+                    }
+                }
             }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+//  视频时间轴组件
+// ──────────────────────────────────────────────────────────────
+
+@Composable
+private fun VideoTimeline(
+    currentFrame: Int,
+    totalFrames: Int,
+    frameMasks: Map<Int, List<EditorViewModel.MaskRect>>,
+    onSeek: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(80.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        // 帧计数行
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "第 ${currentFrame + 1} 帧",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White
+            )
+            Text(
+                text = "/ $totalFrames 帧",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.6f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // 时间轴行（含帧标记点 + Slider）
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = Alignment.Center
+        ) {
+            // 帧标记点（显示有蒙版的帧，绿点）
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val yCenter = size.height / 2
+
+                // 绘制帧标记点
+                frameMasks.keys.forEach { idx ->
+                    val x = (idx.toFloat() / (totalFrames - 1).coerceAtLeast(1)) * w
+                    drawCircle(
+                        color = Color(0xFF4CAF50),
+                        radius = 4.dp.toPx(),
+                        center = Offset(x, yCenter)
+                    )
+                }
+
+                // 橙色当前位置竖线
+                val thumbX = if (totalFrames > 1) {
+                    (currentFrame.toFloat() / (totalFrames - 1)) * w
+                } else w / 2
+                drawLine(
+                    color = Color(0xFFFF9800),
+                    start = Offset(thumbX, 0f),
+                    end = Offset(thumbX, size.height),
+                    strokeWidth = 2.dp.toPx()
+                )
+            }
+
+            // 透明 Slider（覆盖整个时间轴区域用于拖动）
+            Slider(
+                value = currentFrame.toFloat(),
+                onValueChange = { newVal ->
+                    onSeek(newVal.toInt())
+                },
+                valueRange = 0f..(totalFrames - 1).coerceAtLeast(1).toFloat(),
+                steps = 0,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = Color(0xFFFF9800),
+                    activeTrackColor = Color(0xFFFF9800),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                )
+            )
         }
     }
 }

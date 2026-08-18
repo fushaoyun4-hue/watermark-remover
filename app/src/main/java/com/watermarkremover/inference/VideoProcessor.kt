@@ -228,10 +228,12 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 处理视频（逐帧处理 + 合成）
+     *
+     * @param frameMasks 按帧索引存储的蒙版 Map。若某帧无蒙版，沿用首帧蒙版。
      */
     fun processVideo(
         videoUri: Uri,
-        masks: List<MaskArea>
+        frameMasks: Map<Int, List<MaskArea>>
     ): Flow<ProcessState> = flow {
         try {
             val timestamp = System.currentTimeMillis()
@@ -259,6 +261,11 @@ class VideoProcessor @Inject constructor(
                 return@flow
             }
 
+            // 获取全局默认蒙版（首帧蒙版；若首帧无蒙版取第一份蒙版）
+            val defaultMasks: List<MaskArea> = frameMasks[0]
+                ?: frameMasks.values.firstOrNull()
+                ?: emptyList()
+
             // 阶段2：逐帧 AI 修复（带时序平滑）
             val modelDesc = if (onnxInpainter.hasModel) "（AI 模型）" else "（OpenCV）"
             emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
@@ -270,8 +277,11 @@ class VideoProcessor @Inject constructor(
                     BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
 
                 if (bitmap != null) {
+                    // 获取当前帧蒙版（无则用默认蒙版）
+                    val rawMasks = frameMasks[idx] ?: defaultMasks
+
                     // 时序平滑处理（prevMasks 会在内部自动融合并传递）
-                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, masks, prevMasks)
+                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, rawMasks, prevMasks)
                     prevMasks = blendedMasks  // 保留给下一帧
 
                     val outputFile = File(repairedDir, frameFile.name)
@@ -350,6 +360,7 @@ class VideoProcessor @Inject constructor(
 
     /**
      * 逐帧处理（带时序平滑）
+     * rawMasks: 当前帧的蒙版（可能来自 frameMasks Map 或 defaultMasks）
      * prevMasks: 上一帧融合后的蒙版，用于下一帧平滑
      * 返回：处理后图片 + 融合后的蒙版（供下一帧使用）
      */
@@ -419,6 +430,7 @@ object FFmpegExtractor {
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun mergeFrames(
         framesDir: File,
         outputFile: File,
