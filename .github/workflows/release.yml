@@ -33,17 +33,6 @@ jobs:
           java-version: '17'
           distribution: temurin
 
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          # 包含 commit SHA，确保每次 commit 用独立缓存，避免旧 .class 文件残留导致编译错误
-          key: ${{ runner.os }}-gradle-${{ github.sha }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
       - name: Create local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
@@ -105,7 +94,7 @@ jobs:
           echo "=== Listing all Gradle tasks ==="
           ./gradlew tasks --all 2>&1 | grep -E "(assemble|APK|apk)" | head -30
           echo "=== Building $GRADLE_TASK with --rerun-tasks ==="
-          ./gradlew $GRADLE_TASK --no-daemon --rerun-tasks --stacktrace 2>&1 | tee build.log
+          ./gradlew $GRADLE_TASK --no-daemon --rerun-tasks --stacktrace --no-build-cache 2>&1 | tee build.log
           EXIT_CODE=${PIPESTATUS[0]}
           echo "=== Gradle PIPESTATUS: $EXIT_CODE ==="
           echo "=== Full app/build directory ==="
