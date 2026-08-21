@@ -806,7 +806,7 @@ fun EditorScreen(
                             Icon(Icons.Filled.Delete, contentDescription = "撤销最后框")
                         }
                         IconButton(
-                            onClick = { viewModel.clearMasks() },
+                            onClick = { viewModel.clearAllMasks() },
                             enabled = viewModel.masks.isNotEmpty()
                         ) {
                             Icon(Icons.Filled.DeleteSweep, contentDescription = "清空全部")
