@@ -462,7 +462,6 @@ class VideoProcessor @Inject constructor(
             emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
 
             var prevMasks: List<MaskArea>? = null  // 上一帧融合后的蒙版
-            var prevGray: Mat? = null              // 上一帧灰度图（帧差法用）
 
             for ((idx, frameFile) in frameFiles.withIndex()) {
                 val bitmap = BitmapFactory.decodeFile(frameFile.absolutePath,
@@ -472,15 +471,15 @@ class VideoProcessor @Inject constructor(
                     // 获取当前帧蒙版（无则用默认蒙版）
                     val rawMasks = frameMasks[idx] ?: defaultMasks
 
-                    // ── 时序一致性：帧差法检测动态区域，动态像素 > 30% 的蒙版跳过 inpaint ──
-                    val currGray = toGrayMat(bitmap)
-                    val activeMasks = filterDynamicMasks(prevGray, currGray, rawMasks, bitmap.width, bitmap.height)
-                    prevGray?.release()
-                    prevGray = currGray
+                    // ── 修复：禁用帧差法动态蒙版过滤 ──
+                    // 原逻辑 filterDynamicMasks 会把「蒙版区域动态像素 ≥30%」误判为物体穿过而跳过 inpaint，
+                    // 导致固定水印/台标（下方背景在动）的帧不修复 → 水印去除不干净。
+                    // 用户诉求是固定水印在整个视频时长内都被去除，故每帧都强制 inpaint。
+                    val activeMasks = rawMasks
 
                     // 时序平滑处理（prevMasks 会在内部自动融合并传递）
                     val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, activeMasks, prevMasks)
-                    prevMasks = if (activeMasks.size == rawMasks.size) blendedMasks else prevMasks  // 跳过时不污染平滑历史
+                    prevMasks = blendedMasks
 
                     val outputFile = File(repairedDir, frameFile.name)
                     FileOutputStream(outputFile).use { fos ->
@@ -493,9 +492,6 @@ class VideoProcessor @Inject constructor(
                 val progress = 5 + ((idx + 1) * 85 / totalFrames)
                 emit(ProcessState.Progress(progress.coerceIn(5, 90), 100, "处理中 ${idx + 1}/$totalFrames"))
             }
-
-            prevGray?.release()
-            prevGray = null
 
             // 阶段3：合成视频
             emit(ProcessState.Progress(92, 100, "正在合成视频..."))
