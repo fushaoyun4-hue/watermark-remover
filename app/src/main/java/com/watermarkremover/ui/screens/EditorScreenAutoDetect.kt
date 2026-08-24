@@ -4,7 +4,17 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.elevatedCard
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,7 +38,21 @@ fun EditorScreenAutoDetect(
     viewModel: EditorViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    val state = viewModel.state
+    var state by remember { mutableStateOf(viewModel.state) }
+    
+    // 监听状态变化
+    LaunchedEffect(viewModel.state) {
+        state = viewModel.state
+    }
+    
+    // 当处理完成且有结果 URI 时，调用回调
+    LaunchedEffect(state.resultUri) {
+        if (state.resultUri != null) {
+            onProcessed(state.resultUri!!)
+            // 重置状态，允许再次处理
+            viewModel.resetAutoDetectState()
+        }
+    }
     
     WatermarkRemoverTheme {
         Scaffold(

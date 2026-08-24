@@ -3,6 +3,7 @@ package com.watermarkremover.ui.screens
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.RectF
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
@@ -187,6 +188,108 @@ class EditorViewModel @Inject constructor(
      */
     var masks by mutableStateOf(listOf<MaskRect>())
         private set
+
+    // ──────────────────────────────────────────────────────────
+    //  AI 自动检测模式状态
+    // ──────────────────────────────────────────────────────────
+
+    /** AI 自动检测处理状态 */
+    data class AutoDetectState(
+        val videoBitmap: Bitmap? = null,
+        val progress: Int = 0,
+        val statusText: String = "",
+        val resultUri: Uri? = null
+    )
+    
+    private val _autoDetectState = mutableStateOf(AutoDetectState())
+    val state: AutoDetectState get() = _autoDetectState.value
+    
+    /**
+     * 重置 AI 自动检测状态
+     */
+    fun resetAutoDetectState() {
+        _autoDetectState.value = AutoDetectState()
+    }
+    
+    /**
+     * AI 自动检测去水印（无需手动框选）
+     *
+     * @param videoUri 视频 URI
+     * @param context 应用上下文
+     */
+    fun processVideo(videoUri: Uri, context: Context) {
+        viewModelScope.launch {
+            try {
+                // 加载视频第一帧作为预览
+                val bitmap = withContext(Dispatchers.IO) {
+                    loadVideoFirstFrame(context, videoUri)
+                }
+                
+                if (bitmap != null) {
+                    _autoDetectState.value = _autoDetectState.value.copy(
+                        videoBitmap = bitmap,
+                        progress = 10,
+                        statusText = "AI 模型正在加载..."
+                    )
+                } else {
+                    _autoDetectState.value = _autoDetectState.value.copy(
+                        statusText = "无法加载视频"
+                    )
+                    return@launch
+                }
+                
+                // 调用 VideoProcessor 的自动检测模式（传入空列表）
+                emitAll(videoProcessor.processVideo(videoUri, emptyList()).collectLatest { processState ->
+                    when (processState) {
+                        is VideoProcessor.ProcessState.Progress -> {
+                            _autoDetectState.value = _autoDetectState.value.copy(
+                                progress = processState.current,
+                                statusText = processState.phase
+                            )
+                        }
+                        is VideoProcessor.ProcessState.Success -> {
+                            _autoDetectState.value = _autoDetectState.value.copy(
+                                progress = 100,
+                                statusText = "处理完成",
+                                resultUri = processState.outputUri
+                            )
+                        }
+                        is VideoProcessor.ProcessState.Error -> {
+                            _autoDetectState.value = _autoDetectState.value.copy(
+                                statusText = "错误：${processState.message}"
+                            )
+                        }
+                    }
+                })
+            } catch (e: Exception) {
+                _autoDetectState.value = _autoDetectState.value.copy(
+                    statusText = "处理失败：${e.message}"
+                )
+            }
+        }
+    }
+    
+    /**
+     * 从 URI 加载视频的第一帧
+     */
+    private fun loadVideoFirstFrame(context: Context, uri: Uri): Bitmap? {
+        return try {
+            MediaMetadataRetriever().use { retriever ->
+                retriever.setDataSource(context, uri)
+                retriever.frameAtTime
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+    
+    /**
+     * 处理完成回调
+     */
+    private fun onComplete(outputPath: String, inputPath: String) {
+        // TODO: 通过 LaunchedEffect 或返回 Result 通知 UI 层
+    }
 
     // ──────────────────────────────────────────────────────────
     //  待确认框（仍在当前帧）
