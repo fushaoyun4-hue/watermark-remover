@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.withContext
 import com.arthenica.ffmpegkit.ReturnCode
 import org.opencv.android.Utils
@@ -417,6 +418,25 @@ class VideoProcessor @Inject constructor(
 
         return result
     }
+
+    /**
+     * 处理视频（逐帧处理 + 合成）- 兼容旧版本
+     *
+     * @param videoUri 视频文件URI
+     * @param frameMasks 按帧索引存储的蒙版 Map。若某帧无蒙版，沿用首帧蒙版。
+     */
+    fun processVideo(
+        videoUri: Uri,
+        frameMasks: Map<Int, List<MaskArea>>
+    ): Flow<ProcessState> = flow {
+        // 获取全局默认蒙版（首帧蒙版；若首帧无蒙版取第一份蒙版）
+        val defaultMasks: List<MaskArea> = frameMasks[0]
+            ?: frameMasks.values.firstOrNull()
+            ?: emptyList()
+        
+        // 转换为List模式调用新版本
+        emitAll(processVideo(videoUri, defaultMasks))
+    }.flowOn(Dispatchers.IO)
 
     /**
      * 处理视频（逐帧处理 + 合成）
