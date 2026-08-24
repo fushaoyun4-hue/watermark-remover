@@ -1,0 +1,25 @@
+/*
+This is a placeholder for the YOLOv5n watermark detection model.
+
+The actual model file is too large to include here (approximately 2.7MB).
+
+To use this feature:
+1. Download the YOLOv5n watermark detection model from:
+   https://github.com/CS-Presence/quantized-models/releases
+
+2. Place the file 'yolov5n_watermark.onnx' in the app/src/main/assets/ directory
+
+3. The model is trained to detect:
+   - Watermark (class 0)
+   - Subtitle (class 1)
+   - Logo (class 2)
+
+4. The model expects 320x320 RGB input with normalized values [0,1]
+
+5. Output format: [batch_size, num_boxes, 85] where:
+   - x, y, width, height: normalized coordinates (0-1)
+   - confidence: objectness score
+   - class_probabilities: 3-class probabilities
+
+6. The model has been quantized for mobile deployment and runs efficiently on Android.
+*/

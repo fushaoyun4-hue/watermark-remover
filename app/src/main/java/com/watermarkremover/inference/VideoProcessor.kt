@@ -41,7 +41,8 @@ import javax.inject.Singleton
 @Singleton
 class VideoProcessor @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val onnxInpainter: OnnxInpainter   // AI 模型推理器（无模型时 hasModel=false）
+    private val onnxInpainter: OnnxInpainter,   // AI 模型推理器（无模型时 hasModel=false）
+    private val watermarkDetector: WatermarkDetector  // 自动水印检测器
 ) {
     companion object {
         private const val TAG = "VideoProcessor"
@@ -420,11 +421,12 @@ class VideoProcessor @Inject constructor(
     /**
      * 处理视频（逐帧处理 + 合成）
      *
-     * @param frameMasks 按帧索引存储的蒙版 Map。若某帧无蒙版，沿用首帧蒙版。
+     * @param videoUri 视频文件URI
+     * @param masks 手动蒙版列表（可为空，用于自动检测模式）
      */
     fun processVideo(
         videoUri: Uri,
-        frameMasks: Map<Int, List<MaskArea>>
+        masks: List<MaskArea>
     ): Flow<ProcessState> = flow {
         try {
             val timestamp = System.currentTimeMillis()
@@ -452,14 +454,88 @@ class VideoProcessor @Inject constructor(
                 return@flow
             }
 
-            // 获取全局默认蒙版（首帧蒙版；若首帧无蒙版取第一份蒙版）
-            val defaultMasks: List<MaskArea> = frameMasks[0]
-                ?: frameMasks.values.firstOrNull()
-                ?: emptyList()
+            // 阶段2：自动检测水印（如果未提供手动蒙版）
+            val autoDetectedMasks = if (masks.isEmpty()) {
+                // 使用自动检测
+                val detections = mutableListOf<Detection>()
+                val frameCount = frameFiles.size
+                
+                for (i in frameFiles.indices) {
+                    val framePath = frameFiles[i]
+                    val bitmap = BitmapFactory.decodeFile(framePath.absolutePath)
+                    if (bitmap == null) continue
+                    
+                    // 转换为 OpenCV Mat
+                    val mat = Mat()
+                    Utils.bitmapToMat(bitmap, mat)
+                    
+                    // 检测水印
+                    val frameDetections = watermarkDetector.detect(mat)
+                    detections.addAll(frameDetections)
+                    
+                    // 回收位图
+                    bitmap.recycle()
+                    mat.release()
+                    
+                    // 更新进度
+                    val progress = ((i + 1) * 10) / frameCount  // 10% 用于检测
+                    emit(ProcessState.Progress(progress, 100, "自动检测水印... ($i/$frameCount)"))
+                }
+                
+                // 生成全局蒙版（所有帧共享）
+                if (detections.isNotEmpty()) {
+                    // 使用第一帧的尺寸作为基准
+                    val firstFrame = BitmapFactory.decodeFile(frameFiles[0].absolutePath)
+                    val mask = watermarkDetector.generateMaskFromDetections(detections, Size(firstFrame.width.toDouble(), firstFrame.height.toDouble()))
+                    
+                    // 转换为 MaskArea
+                    val maskAreas = mutableListOf<MaskArea>()
+                    val maskBitmap = Bitmap.createBitmap(firstFrame.width, firstFrame.height, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(maskBitmap)
+                    canvas.drawColor(Color.BLACK)
+                    
+                    val paint = Paint().apply {
+                        color = Color.WHITE
+                        style = Paint.Style.FILL
+                        isAntiAlias = false
+                    }
+                    
+                    // 从蒙版提取检测框
+                    val contours = mutableListOf<org.opencv.core.MatOfPoint>()
+                    val hierarchy = org.opencv.core.Mat()
+                    Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+                    
+                    for (contour in contours) {
+                        val rect = Imgproc.boundingRect(contour)
+                        val maskArea = MaskArea(
+                            rect = RectF(
+                                rect.x.toFloat() / firstFrame.width,
+                                rect.y.toFloat() / firstFrame.height,
+                                (rect.x + rect.width).toFloat() / firstFrame.width,
+                                (rect.y + rect.height).toFloat() / firstFrame.height
+                            ),
+                            isFreehand = false
+                        )
+                        maskAreas.add(maskArea)
+                    }
+                    
+                    // 清理资源
+                    mask.release()
+                    maskBitmap.recycle()
+                    contours.forEach { it.release() }
+                    hierarchy.release()
+                    
+                    maskAreas
+                } else {
+                    emptyList()
+                }
+            } else {
+                masks
+            }
 
-            // 阶段2：逐帧 AI 修复（带时序平滑）
+            // 阶段3：逐帧 AI 修复（带时序平滑）
             val modelDesc = if (onnxInpainter.hasModel) "（AI 模型）" else "（OpenCV）"
-            emit(ProcessState.Progress(5, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
+            emit(ProcessState.Progress(15, 100, "正在去除水印$modelDesc（$totalFrames 帧）..."))
 
             var prevMasks: List<MaskArea>? = null  // 上一帧融合后的蒙版
 
@@ -468,17 +544,8 @@ class VideoProcessor @Inject constructor(
                     BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
 
                 if (bitmap != null) {
-                    // 获取当前帧蒙版（无则用默认蒙版）
-                    val rawMasks = frameMasks[idx] ?: defaultMasks
-
-                    // ── 修复：禁用帧差法动态蒙版过滤 ──
-                    // 原逻辑 filterDynamicMasks 会把「蒙版区域动态像素 ≥30%」误判为物体穿过而跳过 inpaint，
-                    // 导致固定水印/台标（下方背景在动）的帧不修复 → 水印去除不干净。
-                    // 用户诉求是固定水印在整个视频时长内都被去除，故每帧都强制 inpaint。
-                    val activeMasks = rawMasks
-
                     // 时序平滑处理（prevMasks 会在内部自动融合并传递）
-                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, activeMasks, prevMasks)
+                    val (repaired, blendedMasks) = processFrameWithSmoothing(bitmap, autoDetectedMasks, prevMasks)
                     prevMasks = blendedMasks
 
                     val outputFile = File(repairedDir, frameFile.name)
@@ -489,11 +556,11 @@ class VideoProcessor @Inject constructor(
                     bitmap.recycle()
                 }
 
-                val progress = 5 + ((idx + 1) * 85 / totalFrames)
-                emit(ProcessState.Progress(progress.coerceIn(5, 90), 100, "处理中 ${idx + 1}/$totalFrames"))
+                val progress = 15 + ((idx + 1) * 75 / totalFrames)
+                emit(ProcessState.Progress(progress.coerceIn(15, 90), 100, "处理中 ${idx + 1}/$totalFrames"))
             }
 
-            // 阶段3：合成视频
+            // 阶段4：合成视频
             emit(ProcessState.Progress(92, 100, "正在合成视频..."))
             val mergeResult = FFmpegExtractor.mergeFrames(
                 framesDir   = repairedDir,
