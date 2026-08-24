@@ -506,7 +506,7 @@ class VideoProcessor @Inject constructor(
                 if (detections.isNotEmpty()) {
                     // 使用第一帧的尺寸作为基准
                     val firstFrame = BitmapFactory.decodeFile(frameFiles[0].absolutePath)
-                    val mask = watermarkDetector.generateMaskFromDetections(detections, Size(firstFrame.width.toDouble(), firstFrame.height.toDouble()))
+                    val mask = watermarkDetector.generateMaskFromDetections(detections, org.opencv.core.Size(firstFrame.width.toDouble(), firstFrame.height.toDouble()))
                     
                     // 转换为 MaskArea
                     val maskAreas = mutableListOf<MaskArea>()
@@ -533,8 +533,7 @@ class VideoProcessor @Inject constructor(
                                 rect.y.toFloat() / firstFrame.height,
                                 (rect.x + rect.width).toFloat() / firstFrame.width,
                                 (rect.y + rect.height).toFloat() / firstFrame.height
-                            ),
-                            isFreehand = false
+                            )
                         )
                         maskAreas.add(maskArea)
                     }

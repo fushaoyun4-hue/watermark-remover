@@ -1,5 +1,6 @@
 package com.watermarkremover.ui.screens
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.RectF
@@ -202,7 +203,8 @@ class EditorViewModel @Inject constructor(
     )
     
     private val _autoDetectState = mutableStateOf(AutoDetectState())
-    val state: AutoDetectState get() = _autoDetectState.value
+    /** 暴露为 State 对象，Compose 可订阅变化触发重组 */
+    val state: State<AutoDetectState> = _autoDetectState
     
     /**
      * 重置 AI 自动检测状态
@@ -239,7 +241,7 @@ class EditorViewModel @Inject constructor(
                 }
                 
                 // 调用 VideoProcessor 的自动检测模式（传入空列表）
-                emitAll(videoProcessor.processVideo(videoUri, emptyList()).collectLatest { processState ->
+                videoProcessor.processVideo(videoUri, emptyList()).collectLatest { processState ->
                     when (processState) {
                         is VideoProcessor.ProcessState.Progress -> {
                             _autoDetectState.value = _autoDetectState.value.copy(
@@ -282,13 +284,6 @@ class EditorViewModel @Inject constructor(
             e.printStackTrace()
             null
         }
-    }
-    
-    /**
-     * 处理完成回调
-     */
-    private fun onComplete(outputPath: String, inputPath: String) {
-        // TODO: 通过 LaunchedEffect 或返回 Result 通知 UI 层
     }
 
     // ──────────────────────────────────────────────────────────
