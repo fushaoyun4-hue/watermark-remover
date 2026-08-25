@@ -20,6 +20,7 @@ import com.watermarkremover.ui.theme.WatermarkRemoverTheme
  * 自动检测水印的编辑屏幕
  * 支持自动识别水印/字幕，无需手动框选
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreenAutoDetect(
     videoUri: Uri,

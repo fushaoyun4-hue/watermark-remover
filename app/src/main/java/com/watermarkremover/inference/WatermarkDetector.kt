@@ -7,15 +7,21 @@ import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import ai.onnxruntime.*
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * 水印自动检测器
  * 使用轻量级目标检测模型自动识别水印、字幕位置
  */
-class WatermarkDetector(private val context: Context) {
+@Singleton
+class WatermarkDetector @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
     private var ortEnv: OrtEnvironment? = null
     private var ortSession: OrtSession? = null
     private var hasModel = false
@@ -58,7 +64,7 @@ class WatermarkDetector(private val context: Context) {
             
             val sessionOptions = OrtSession.SessionOptions()
             sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            sessionOptions.addCPU()
+            sessionOptions.addCPU(true)
             
             ortSession = ortEnv!!.createSession(modelBytes, sessionOptions)
             hasModel = true
@@ -86,7 +92,7 @@ class WatermarkDetector(private val context: Context) {
             val inputTensor = prepareInputTensor(inputMat)
             
             // 推理
-            val outputs = ortSession!!.run(mapOf(ortSession!!.inputNames[0] to inputTensor))
+            val outputs = ortSession!!.run(mapOf(ortSession!!.inputNames.first() to inputTensor))
             
             // 后处理：解析检测结果
             val detections = postprocessOutputs(outputs, frame.size())
@@ -142,7 +148,7 @@ class WatermarkDetector(private val context: Context) {
         
         return OnnxTensor.createTensor(
             ortEnv!!,
-            inputArray,
+            java.nio.FloatBuffer.wrap(inputArray),
             longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
         )
     }
@@ -150,12 +156,12 @@ class WatermarkDetector(private val context: Context) {
     /**
      * 后处理：解析 YOLO 输出
      */
-    private fun postprocessOutputs(outputs: Map<String, OnnxTensor>, originalSize: Size): List<Detection> {
+    private fun postprocessOutputs(outputs: OrtSession.Result, originalSize: Size): List<Detection> {
         val detections = mutableListOf<Detection>()
         
         try {
-            val outputTensor = outputs[ortSession!!.outputNames[0]]
-            val outputArray = outputTensor?.value as Array<Array<FloatArray>>?
+            val outputTensor = outputs[0] as OnnxTensor
+            val outputArray = outputTensor.value as Array<Array<FloatArray>>?
             
             outputArray?.get(0)?.forEach { detection ->
                 if (detection.size >= 6) {

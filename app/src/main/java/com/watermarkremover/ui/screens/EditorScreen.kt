@@ -262,7 +262,7 @@ class EditorViewModel @Inject constructor(
                             )
                         }
                     }
-                })
+                }
             } catch (e: Exception) {
                 _autoDetectState.value = _autoDetectState.value.copy(
                     statusText = "处理失败：${e.message}"
